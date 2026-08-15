@@ -1,0 +1,21 @@
+Screen {
+    align: center middle;
+    layers: below above;
+}
+
+Input {
+    width: 40;
+}
+
+Label {
+    margin: 1;
+}
+
+#user_agent {
+    margin: 1 0 1 0;
+}
+
+Button {
+    width: 20;
+}
+

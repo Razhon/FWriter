@@ -1,0 +1,37 @@
+ErrorScreen {
+    align: center middle;
+}
+
+#dialog {
+    height: auto;
+    max-height: 35;
+    
+    # width: 2w;
+    min-width: 40;
+    max-width: 80;
+
+    padding: 0 1;
+    border: thick $background 80%;
+    background: $surface;
+}
+
+#title {
+    margin: 1;
+    width: auto;
+}
+
+#data {
+    height: auto;
+    width: 100%;
+
+    margin: 1 0;
+
+    # scrollbar-background: $surface;
+    overflow-x: auto;
+    overflow-y: auto;
+}
+
+#ok {
+    height: auto;
+    width: 100%;
+}
