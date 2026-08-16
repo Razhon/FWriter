@@ -1,20 +1,41 @@
-Screen {
+StartPageTab {
+    # layout: vertical;
+    align: center middle;
     layers: below above;
 }
 
-Input {
-    width: 40;
+Rule {
+    color: $surface;
 }
 
 Label {
     margin: 1;
 }
 
-#user_agent {
-    margin: 1 0 1 0;
+#greeting {
+    margin: 1 0 0 0;
 }
 
-Button {
-    width: 20;
+.fics_container {
+    
+    content-align: center middle;
+    # height: auto;
+    # width: 33%;
+    # background: #f00;
+    # min-width: 40;
+    # margin: 0 33;
+    padding: 0 12;
+    overflow-y: auto;
+    scrollbar-background: #0b0b0b;
 }
 
+.fics_collapsibles_label {
+    # background: #f00;
+    margin: 1 1 1 1;
+}
+
+.chapter_btn {
+    # background: #f00;
+    height: 2;
+    margin: 0;
+}
