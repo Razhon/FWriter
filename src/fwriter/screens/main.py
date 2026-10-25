@@ -65,10 +65,10 @@ class ClickableLabel(Widget, can_focus=True):
         def control(self) -> ClickableLabel:
             return self.clabel
 
-    def __init__(self, input_label: str, classes: str | None = None) -> None:
+    def __init__(self, input_label: str, classes: str | None = None, markup: bool = False) -> None:
         self.input_label = input_label
         self.active_effect_duration = 0.2
-        super().__init__(classes=classes)
+        super().__init__(classes=classes, markup=markup)
 
     def compose(self) -> ComposeResult:
         yield Label(self.input_label, classes="clickable_label")
