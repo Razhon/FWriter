@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from typing import ClassVar
 
+from textual import work
 from textual.app import App
 from textual.binding import BindingType
 from textual.screen import Screen
@@ -19,7 +20,7 @@ class FWriterApp(App):
         "main": "main_screen",
     }
 
-    async def on_mount(self) -> None:
+    def on_mount(self) -> None:
         try:
             cookies, user_agent = SecretStorage.get_auth()
         except Exception as e:  # noqa: BLE001 у бэкендов keyring свои типы ошибок
@@ -34,7 +35,11 @@ class FWriterApp(App):
         if not cookies or not user_agent:
             self.switch_mode("login")
             return
+        self.login_saved(cookies, user_agent)
 
+    # в воркере, чтобы приложение отвечало на клавиши, пока идёт запрос
+    @work(exclusive=True)
+    async def login_saved(self, cookies: dict[str, str], user_agent: str) -> None:
         try:
             api = await FicbookAPI.login(cookies, user_agent)
         except LoginFailedError as e:

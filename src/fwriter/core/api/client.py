@@ -81,7 +81,8 @@ class FicbookAPI:
             response = await self._get("/")
             self.user = self._parse_user(response.text)
         except (httpx.HTTPError, FicbookAPIError) as e:
-            raise LoginFailedError(str(e)) from e
+            # str() у таймаутов httpx пустой
+            raise LoginFailedError(f"{type(e).__name__}: {e}") from e
 
     async def close(self) -> None:
         await self.client.aclose()
@@ -154,9 +155,7 @@ class FicbookAPI:
                     )
 
                     chapter_title = req(
-                        next(chapter_title_unparsed.stripped_strings, "")
-                        .replace("\n", "")
-                        .strip(),
+                        " ".join(chapter_title_unparsed.get_text().split()),
                         f"текст названия главы {chapter_id}",
                     )
 

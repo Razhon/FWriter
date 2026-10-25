@@ -51,6 +51,15 @@ class LoginScreen(Screen):
             return
 
         user_agent = self.query_one("#user_agent", Input).value
+        if not user_agent.isascii():  # httpx кодирует заголовки только в ASCII
+            event.button.disabled = False
+            self.notify(
+                "В User-Agent допустимы только ASCII-символы",
+                title="Ошибка",
+                severity="error",
+                timeout=5,
+            )
+            return
 
         try:
             api = await FicbookAPI.login(cookies, user_agent)
