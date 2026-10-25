@@ -39,6 +39,7 @@ class FWriterApp(App):
             self.install_screen(MainScreen(result.api), name="main_screen")
             self.switch_mode("main")
         else:
+            self.notify(f"Не удалось войти: {result.error}", severity="warning", markup=False)
             self.switch_mode("login")
 
 

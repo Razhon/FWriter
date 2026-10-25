@@ -26,6 +26,8 @@ FIC_SECTIONS = [
 
 
 class ClickableLabel(Widget, can_focus=True):
+    """Намеренный отдельный класс от Button, так легче"""
+    
     DEFAULT_CSS = """
     ClickableLabel {
         width: auto;
@@ -124,7 +126,8 @@ class StartPageTab(TabPane):
                 classes=classes,
             )
 
-        # Ошибка одного списка не прячет остальные: собираем и показываем разом
+        # ошибка одного списка не прячет остальные
+        # цикл намеренный, пока не уверен как Cloudflare отнесётся к такой ораве запросов
         errors: list[str] = []
         for role, label in FIC_SECTIONS:
             try:
