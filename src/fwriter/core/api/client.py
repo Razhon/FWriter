@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from typing import ClassVar, Literal, TypeVar
+from typing import ClassVar, Literal
 
 import httpx
 from bs4 import BeautifulSoup
@@ -22,8 +22,6 @@ class LoginFailure:
 
 
 LoginResult = LoginSuccess | LoginFailure
-
-T = TypeVar("T")
 
 
 def req[T](value: T | None, what: str) -> T:
@@ -178,12 +176,4 @@ class FicbookAPI:
         response = await self.client.post(*args, **kwargs)
         response.raise_for_status()
         return response
-
-    async def get_ficbook_id(self, url: str) -> str:
-        """
-        Get ficbook id from url
-        """
-        response = await self.client.get(url)
-        response.raise_for_status()
-        ficbook_id = response.url.path.split("/")[-1]
-        return ficbook_id
+    

@@ -87,8 +87,4 @@ class LoginScreen(Screen):
 
         self.app.install_screen(MainScreen(result.api), name="main_screen")
         self.app.switch_mode("main")
-
-        # if passed:
-        #     self.exit((api, self.query_one(FilePathDisplay).text.replace('Выбран - ', "")))
-        # else:
-        #     self.notify(data, title="Ошибка", severity='error', timeout=3)
+        

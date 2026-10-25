@@ -11,21 +11,12 @@ from .secrets import *
 
 
 class FWriterApp(App):
-    """A Textual app to manage stopwatches."""
-
     BINDINGS: ClassVar[list[BindingType]] = [("ctrl+c", "quit", "Exit app")]
 
     MODES: ClassVar[dict[str, str | Callable[[], Screen]]] = {
         "login": LoginScreen,
         "main": "main_screen",
     }
-
-    api: FicbookAPI | None = None
-
-    # def compose(self) -> ComposeResult:
-    #     """Create child widgets for the app."""
-    #     yield Header()
-    #     yield Footer()
 
     async def on_mount(self) -> None:
         cookies, user_agent = SecretStorage.get_auth()
