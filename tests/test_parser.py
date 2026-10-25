@@ -39,6 +39,22 @@ def test_beta_page():
     assert fics[1].chapters[0].title == "Глава 1. Название 1"
 
 
+def test_user_name_with_spaces():
+    pages = {
+        "/": '<div class="profile-area"><a href="/authors/42">x</a></div>',
+        "/authors/42": "<title>Серый – Кот – профиль автора фанфиков и ориджиналов"
+        " – Книга Фанфиков</title>",
+    }
+    api = FicbookAPI({})
+
+    async def fake_get(path: str) -> httpx.Response:
+        return httpx.Response(200, text=pages[path])
+
+    api._get = fake_get
+    user = asyncio.run(api.get_user_info())
+    assert (user.id, user.name) == (42, "Серый – Кот")
+
+
 def test_changed_layout_raises():
     broken = BETA_PAGE.replace("myfic-header", "renamed-header")
 

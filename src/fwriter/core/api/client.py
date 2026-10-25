@@ -119,7 +119,11 @@ class FicbookAPI:
             if not title or not title.string:
                 raise UserNotLoggedInError("Не найдено имя на странице автора")
 
-            return title.string.split()[0]
+            # "<ник> – профиль автора фанфиков и ориджиналов – Книга Фанфиков"; в нике могут быть пробелы и тире
+            name, sep, _ = title.string.partition(" – профиль автора")
+            if not sep:
+                raise APIChangedError(f"Неожиданный заголовок страницы автора: {title.string}")
+            return name.strip()
 
         user_id = await get_user_id()
         user_name = await get_user_name(user_id)
