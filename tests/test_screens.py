@@ -6,7 +6,9 @@ from textual.widgets._collapsible import CollapsibleTitle
 
 from fwriter.core.api.client import FicbookAPI
 from fwriter.core.api.models import Fic, UserInfo
-from fwriter.screens import MainScreen
+from fwriter.run import FWriterApp
+from fwriter.screens import LoginScreen, MainScreen
+from fwriter.secrets import SecretStorage
 
 
 def test_titles_are_plain_text():
@@ -31,5 +33,19 @@ def test_titles_are_plain_text():
             assert str(greeting.render()) == f"Привет, {tricky}!"
             title = pilot.app.screen.query_one(CollapsibleTitle)
             assert tricky in str(title.render())
+
+    asyncio.run(run())
+
+
+def test_broken_keyring_opens_login(monkeypatch):
+    def broken_get_auth():
+        raise RuntimeError("no keyring")
+
+    monkeypatch.setattr(SecretStorage, "get_auth", broken_get_auth)
+
+    async def run():
+        async with FWriterApp().run_test() as pilot:
+            await pilot.pause()
+            assert isinstance(pilot.app.screen, LoginScreen)
 
     asyncio.run(run())

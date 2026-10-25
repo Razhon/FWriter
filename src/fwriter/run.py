@@ -19,7 +19,17 @@ class FWriterApp(App):
     }
 
     async def on_mount(self) -> None:
-        cookies, user_agent = SecretStorage.get_auth()
+        try:
+            cookies, user_agent = SecretStorage.get_auth()
+        except Exception as e:  # noqa: BLE001 у бэкендов keyring свои типы ошибок
+            self.notify(
+                f"Не удалось прочитать сохранённый вход: {e}",
+                severity="warning",
+                timeout=6,
+                markup=False,
+            )
+            cookies, user_agent = None, None
+
         if not cookies or not user_agent:
             self.switch_mode("login")
             return
