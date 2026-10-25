@@ -143,3 +143,6 @@ class MainScreen(Screen):
     def compose(self) -> ComposeResult:
         with TabbedContent():
             yield StartPageTab(self.api)
+
+    async def on_unmount(self) -> None:
+        await self.api.close()

@@ -122,7 +122,9 @@ class FicbookAPI:
             # "<ник> – профиль автора фанфиков и ориджиналов – Книга Фанфиков"; в нике могут быть пробелы и тире
             name, sep, _ = title.string.partition(" – профиль автора")
             if not sep:
-                raise APIChangedError(f"Неожиданный заголовок страницы автора: {title.string}")
+                raise APIChangedError(
+                    f"Неожиданный заголовок страницы автора: {title.string}"
+                )
             return name.strip()
 
         user_id = await get_user_id()
