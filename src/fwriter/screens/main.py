@@ -1,5 +1,5 @@
 from functools import partial
-from typing import ClassVar, Self
+from typing import ClassVar
 
 import httpx
 from textual import events
@@ -36,20 +36,13 @@ class ClickableLabel(Widget, can_focus=True):
         }
         &.-active {
             text-style: reverse;
-            # tint: $background 30%;
         }
     }
-    
-    .clickable_label {
-        
-        &:hover {
-            pointer: pointer;
-            text-style: underline;
-        }
+
+    .clickable_label:hover {
+        pointer: pointer;
+        text-style: underline;
     }
-    
-    
-    
     """
 
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -65,38 +58,28 @@ class ClickableLabel(Widget, can_focus=True):
         def control(self) -> ClickableLabel:
             return self.clabel
 
-    def __init__(self, input_label: str, classes: str | None = None, markup: bool = False) -> None:
+    def __init__(
+        self, input_label: str, classes: str | None = None, markup: bool = False
+    ) -> None:
         self.input_label = input_label
-        self.active_effect_duration = 0.2
         super().__init__(classes=classes, markup=markup)
 
     def compose(self) -> ComposeResult:
-        yield Label(self.input_label, classes="clickable_label")
+        yield Label(
+            self.input_label, classes="clickable_label", markup=self._render_markup
+        )
 
     async def _on_click(self, event: events.Click) -> None:
         event.stop()
-        if not self.has_class("-active"):
-            self.press()
-
-    def press(self) -> Self:
-        if self.disabled or not self.display:
-            return self
-        # Manage the "active" effect:
-        self._start_active_affect()
-        # ...and let other components know that we've just been clicked:
-        self.post_message(ClickableLabel.Pressed(self))
-        return self
-
-    def _start_active_affect(self) -> None:
-        if self.active_effect_duration > 0:
-            self.add_class("-active")
-            self.set_timer(
-                self.active_effect_duration, partial(self.remove_class, "-active")
-            )
+        self.action_press()
 
     def action_press(self) -> None:
-        if not self.has_class("-active"):
-            self.press()
+        # Пока идёт подсветка нажатия, повторные нажатия игнорируются
+        if self.disabled or not self.display or self.has_class("-active"):
+            return
+        self.add_class("-active")
+        self.set_timer(0.2, partial(self.remove_class, "-active"))
+        self.post_message(ClickableLabel.Pressed(self))
 
 
 class StartPageTab(TabPane):
@@ -123,7 +106,9 @@ class StartPageTab(TabPane):
                         for ch in fic.chapters
                     ],
                     ClickableLabel(
-                        "[bold]Новая глава ->[/]", classes="new_chapter_btn"
+                        "[bold]Новая глава ->[/]",
+                        classes="new_chapter_btn",
+                        markup=True,
                     ),  # TODO отключить для всех, кроме автора/соавтора с правами редактирования
                     title=fic.title,
                     classes=classes,
