@@ -26,10 +26,12 @@ LoginResult = LoginSuccess | LoginFailure
 T = TypeVar("T")
 
 
-def req[T](value: T | None) -> T:
+def req[T](value: T | None, what: str) -> T:
     """Требует, чтобы value было не None/не пустым, иначе — APIChangedError."""
     if not value:
-        raise APIChangedError()
+        raise APIChangedError(
+            f"Не найдено на странице: {what}. Похоже, ficbook изменил разметку."
+        )
     return value
 
 
@@ -57,13 +59,13 @@ class FicbookAPI:
         api = cls(cookies, user_agent)
         try:
             response = await api._post("/home/messaging/gettoken")
-        except httpx.HTTPStatusError as e:
-            return LoginFailure(False, f"{e.response.status_code} {e.response.text}")
+            
+            if bool(response.json().get("result") is True):
+                return LoginSuccess(True, api)
+        except (httpx.HTTPError, ValueError) as e: 
+            return LoginFailure(False, str(e))
 
-        if bool(response.json().get("result") is True):
-            return LoginSuccess(True, api)
-        else:
-            return LoginFailure(False, f"{response.status_code} {response.text}")
+        return LoginFailure(False, f"{response.status_code} {response.text}")
 
     async def get_user_info(self) -> UserInfo:
         if self.user:
@@ -75,7 +77,9 @@ class FicbookAPI:
             soup = BeautifulSoup(response.text, "html.parser")
             profile_area = soup.find("div", class_="profile-area")
             if not profile_area:
-                raise UserNotLoggedInError()
+                raise UserNotLoggedInError(
+                    "На главной нет блока профиля: cookies недействительны"
+                )
 
             links = [
                 str(a.get("href", "")) for a in profile_area.find_all("a", limit=4)
@@ -85,17 +89,15 @@ class FicbookAPI:
                 match = self._USER_ID_RE.search(link)
                 if match:
                     return int(match.group(1))
-            raise UserNotLoggedInError()
+            raise UserNotLoggedInError("Не найден id пользователя в блоке профиля")
 
         async def get_user_name(user_id: int) -> str:
             response = await self._get(f"/authors/{user_id!s}")
 
             soup = BeautifulSoup(response.text, "html.parser")
             title = soup.title
-            if not title:
-                raise UserNotLoggedInError()
-            if not title.string:
-                raise UserNotLoggedInError()
+            if not title or not title.string:
+                raise UserNotLoggedInError("Не найдено имя на странице автора")
 
             return title.string.split()[0]
 
@@ -115,13 +117,14 @@ class FicbookAPI:
 
         fics: list[Fic] = []
         for fic_unparsed in fics_unparsed:
-            fic_id_raw = req(str(fic_unparsed.get("data-id", "")))
+            fic_id_raw = req(str(fic_unparsed.get("data-id", "")), "id фанфика (data-id)")
             id_ = int(fic_id_raw)
 
             title_unparsed = req(
-                fic_unparsed.select_one("div.myfic-header.word-break > span > a")
+                fic_unparsed.select_one("div.myfic-header.word-break > span > a"),
+                "ссылка с названием фанфика",
             )
-            title = req(title_unparsed.string)
+            title = req(title_unparsed.string, "текст названия фанфика")
 
             chapters: list[SlimChapterInfo] = []
             content_list_unparsed = fic_unparsed.select_one(
@@ -130,17 +133,23 @@ class FicbookAPI:
             if content_list_unparsed:
                 chapters_links_unparsed = content_list_unparsed.find_all("a")
                 for ch_link in chapters_links_unparsed:
-                    match = req(self._CHAPTER_RE.search(str(ch_link.get("href", ""))))
+                    href = str(ch_link.get("href", ""))
+                    match = req(self._CHAPTER_RE.search(href), f"ссылка на главу ({href})")
                     if match.group(1) != fic_id_raw:
-                        raise APIChangedError()
+                        raise APIChangedError(
+                            f"Глава {href} не относится к фанфику {fic_id_raw}"
+                        )
 
                     chapter_id = int(match.group(2))
-                    chapter_title_unparsed = req(ch_link.find("span"))
+                    chapter_title_unparsed = req(
+                        ch_link.find("span"), f"название главы {chapter_id}"
+                    )
 
                     chapter_title = req(
                         next(chapter_title_unparsed.stripped_strings, "")
                         .replace("\n", "")
-                        .strip()
+                        .strip(),
+                        f"текст названия главы {chapter_id}",
                     )
 
                     chapters.append(SlimChapterInfo(chapter_id, chapter_title))
@@ -157,13 +166,14 @@ class FicbookAPI:
 
         fics: list[Fic] = []
         for fic_unparsed in fics_unparsed:
-            fic_id_raw = req(str(fic_unparsed.get("data-id", "")))
+            fic_id_raw = req(str(fic_unparsed.get("data-id", "")), "id фанфика (data-id)")
             id_ = int(fic_id_raw)
 
             title_unparsed = req(
-                fic_unparsed.select_one("div.myfic-header.word-break > span > a")
+                fic_unparsed.select_one("div.myfic-header.word-break > span > a"),
+                "ссылка с названием фанфика",
             )
-            title = req(title_unparsed.string)
+            title = req(title_unparsed.string, "текст названия фанфика")
 
             chapters: list[SlimChapterInfo] = []
             content_list_unparsed = fic_unparsed.select_one(
@@ -172,17 +182,23 @@ class FicbookAPI:
             if content_list_unparsed:
                 chapters_links_unparsed = content_list_unparsed.find_all("a")
                 for ch_link in chapters_links_unparsed:
-                    match = req(self._CHAPTER_RE.search(str(ch_link.get("href", ""))))
+                    href = str(ch_link.get("href", ""))
+                    match = req(self._CHAPTER_RE.search(href), f"ссылка на главу ({href})")
                     if match.group(1) != fic_id_raw:
-                        raise APIChangedError()
+                        raise APIChangedError(
+                            f"Глава {href} не относится к фанфику {fic_id_raw}"
+                        )
 
                     chapter_id = int(match.group(2))
-                    chapter_title_unparsed = req(ch_link.find("span"))
+                    chapter_title_unparsed = req(
+                        ch_link.find("span"), f"название главы {chapter_id}"
+                    )
 
                     chapter_title = req(
                         next(chapter_title_unparsed.stripped_strings, "")
                         .replace("\n", "")
-                        .strip()
+                        .strip(),
+                        f"текст названия главы {chapter_id}",
                     )
 
                     chapters.append(SlimChapterInfo(chapter_id, chapter_title))

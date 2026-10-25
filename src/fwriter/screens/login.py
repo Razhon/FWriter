@@ -38,19 +38,23 @@ class LoginScreen(Screen):
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "login":
             return
+        event.button.disabled = True
+        
         cookies = None
+        cookies_json = None
         try:
             cookies = json.loads(self.query_one("#cookies", Input).value)
-        except json.JSONDecodeError:
+
+            cookies_json: dict | None = (
+                {cookie["name"]: cookie["value"] for cookie in cookies}
+                if isinstance(cookies, list)
+                else None
+            )
+        except (json.JSONDecodeError, KeyError, TypeError):
             pass
 
-        cookies_json: dict | None = (
-            {cookie["name"]: cookie["value"] for cookie in cookies}
-            if isinstance(cookies, list)
-            else None
-        )
-
         if cookies_json is None or len(cookies_json.keys()) < 2:
+            event.button.disabled = False
             self.notify(
                 "Неверные cookies!", title="Ошибка", severity="error", timeout=3
             )
@@ -61,6 +65,7 @@ class LoginScreen(Screen):
         result = await FicbookAPI.try_login(cookies_json, user_agent)
         log(result)
         if result.ok is False:
+            event.button.disabled = False
             self.app.push_screen(ErrorScreen(result.error))
             return
 

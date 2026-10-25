@@ -37,6 +37,8 @@ class FWriterApp(App):
         if result.ok is True:
             self.install_screen(MainScreen(result.api), name="main_screen")
             self.switch_mode("main")
+        else:
+            self.switch_mode("login")
 
 
 def main():
