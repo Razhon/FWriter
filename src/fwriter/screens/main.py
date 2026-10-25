@@ -34,18 +34,13 @@ class ClickableLabel(Widget, can_focus=True):
         width: auto;
         height: auto;
         min-height: 1;
-        &:focus {
-            pointer: pointer;
+        pointer: pointer;
+        &:focus, &:hover {
             text-style: underline;
         }
         &.-active {
             text-style: reverse;
         }
-    }
-
-    .clickable_label:hover {
-        pointer: pointer;
-        text-style: underline;
     }
     """
 
