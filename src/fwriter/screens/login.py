@@ -46,7 +46,11 @@ class LoginScreen(Screen):
             cookies = json.loads(self.query_one("#cookies", Input).value)
 
             cookies_json: dict | None = (
-                {cookie["name"]: cookie["value"] for cookie in cookies}
+                {
+                    cookie["name"]: cookie["value"]
+                    for cookie in cookies
+                    if cookie["name"] in FicbookAPI.AUTH_COOKIES
+                }
                 if isinstance(cookies, list)
                 else None
             )
@@ -56,7 +60,10 @@ class LoginScreen(Screen):
         if cookies_json is None or len(cookies_json.keys()) < 2:
             event.button.disabled = False
             self.notify(
-                "Неверные cookies!", title="Ошибка", severity="error", timeout=3
+                f"Неверные cookies! Нужны: {', '.join(sorted(FicbookAPI.AUTH_COOKIES))}",
+                title="Ошибка",
+                severity="error",
+                timeout=5,
             )
             return
 
@@ -69,7 +76,14 @@ class LoginScreen(Screen):
             self.app.push_screen(ErrorScreen(result.error))
             return
 
-        SecretStorage.set_auth(cookies_json, user_agent)
+        try:
+            SecretStorage.set_auth(cookies_json, user_agent)
+        except Exception as e:  # noqa: BLE001 — pywintypes.error на Windows, у других бэкендов свои типы
+            self.notify(
+                f"Не удалось сохранить вход: {e}. В следующий раз придётся войти снова.",
+                severity="warning",
+                timeout=6,
+            )
 
         self.app.install_screen(MainScreen(result.api), name="main_screen")
         self.app.switch_mode("main")

@@ -37,6 +37,8 @@ def req[T](value: T | None, what: str) -> T:
 
 class FicbookAPI:
     BASE_URL = "https://ficbook.net"
+    # Только cookies сессии: полный экспорт из браузера не влезает в keyring на Windows
+    AUTH_COOKIES = frozenset({"rme", "PHPSESSID", "cf_clearance"})
 
     _USER_ID_RE = re.compile(r"/authors/(\d+)")
     _CHAPTER_RE = re.compile(r"/home/myfics/(\d+)/parts/(\d+)")
