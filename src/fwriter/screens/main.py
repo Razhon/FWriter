@@ -2,7 +2,7 @@ from functools import partial
 from typing import ClassVar
 
 import httpx
-from textual import events
+from textual import events, work
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Center, VerticalScroll
@@ -93,46 +93,58 @@ class StartPageTab(TabPane):
         yield Rule()
         yield VerticalScroll(classes="fics_container")
 
-    async def on_mount(self) -> None:
+    def on_mount(self) -> None:
+        self.load()
+
+    # воркер отменяется при удалении вкладки и до закрытия клиента в MainScreen.on_unmount
+    @work(exclusive=True)
+    async def load(self) -> None:
         try:
             user = await self.api.get_user_info()
-            self.query_one("#greeting", Label).update(Content(f"Привет, {user.name}!"))
-
-            fics_container = self.query_one(".fics_container", VerticalScroll)
-
-            def gen_fic_collapsible(fic: Fic, classes: str) -> Collapsible:
-                return Collapsible(
-                    *[
-                        ClickableLabel(ch.title, classes="chapter_btn")
-                        for ch in fic.chapters
-                    ],
-                    ClickableLabel(  # TODO отключить для всех, кроме автора/соавтора с правами редактирования
-                        "[bold]Новая глава ->[/]",
-                        classes="new_chapter_btn",
-                        markup=True,
-                    ),
-                    # типизирует title как str, но принимает Content; str разбирается как разметка
-                    title=Content(fic.title),  # pyright: ignore[reportArgumentType]
-                    classes=classes,
-                )
-
-            for role, label in FIC_SECTIONS:
-                fics = await self.api.get_fics(role)
-                if not fics:
-                    continue
-
-                if fics_container.children:  # разделитель
-                    await fics_container.mount(Rule())
-
-                await fics_container.mount(
-                    Label(label, classes="fics_collapsibles_label"),
-                    *[
-                        gen_fic_collapsible(fic, f"{role}_fics_collapsible")
-                        for fic in fics
-                    ],
-                )
         except (FicbookAPIError, httpx.HTTPError) as e:
             self.app.push_screen(ErrorScreen(f"{type(e).__name__}: {e}"))
+            return
+        self.query_one("#greeting", Label).update(Content(f"Привет, {user.name}!"))
+
+        fics_container = self.query_one(".fics_container", VerticalScroll)
+
+        def gen_fic_collapsible(fic: Fic, classes: str) -> Collapsible:
+            return Collapsible(
+                *[
+                    ClickableLabel(ch.title, classes="chapter_btn")
+                    for ch in fic.chapters
+                ],
+                ClickableLabel(  # TODO отключить для всех, кроме автора/соавтора с правами редактирования
+                    "[bold]Новая глава ->[/]",
+                    classes="new_chapter_btn",
+                    markup=True,
+                ),
+                # типизирует title как str, но принимает Content; str разбирается как разметка
+                title=Content(fic.title),  # pyright: ignore[reportArgumentType]
+                classes=classes,
+            )
+
+        # Ошибка одного списка не прячет остальные: собираем и показываем разом
+        errors: list[str] = []
+        for role, label in FIC_SECTIONS:
+            try:
+                fics = await self.api.get_fics(role)
+            except (FicbookAPIError, httpx.HTTPError) as e:
+                errors.append(f"{label} {type(e).__name__}: {e}")
+                continue
+            if not fics:
+                continue
+
+            if fics_container.children:  # разделитель
+                await fics_container.mount(Rule())
+
+            await fics_container.mount(
+                Label(label, classes="fics_collapsibles_label"),
+                *[gen_fic_collapsible(fic, f"{role}_fics_collapsible") for fic in fics],
+            )
+
+        if errors:
+            self.app.push_screen(ErrorScreen("\n".join(errors)))
 
 
 class MainScreen(Screen):
