@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 
 import httpx
@@ -67,3 +68,27 @@ def test_non_numeric_fic_id_raises():
 
     with pytest.raises(APIChangedError, match="Нечисловой id"):
         parse(broken)
+
+
+GOOD = {"rme": "1", "PHPSESSID": "2", "cf_clearance": "3"}
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            json.dumps(
+                [{"name": k, "value": v} for k, v in {**GOOD, "_ga": "x"}.items()]
+            ),
+            GOOD,
+        ),
+        ("мусор", None),
+        ("{}", None),
+        ('{"rme": "1", "PHPSESSID": "2"}', None),
+        ("[1]", None),
+        ('[{"name": "rme"}]', None),
+        ('[{"name": "rme", "value": "1"}]', None),
+    ],
+)
+def test_parse_cookies(text: str, expected: dict[str, str] | None):
+    assert FicbookAPI.parse_cookies(text) == expected

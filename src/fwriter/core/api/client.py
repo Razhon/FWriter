@@ -1,3 +1,4 @@
+import json
 import re
 from dataclasses import dataclass
 from typing import ClassVar, Literal
@@ -60,6 +61,20 @@ class FicbookAPI:
             timeout=5.0,
             follow_redirects=False,
         )
+
+    @classmethod
+    def parse_cookies(cls, text: str) -> dict[str, str] | None:
+        """Cookies сессии из JSON-экспорта браузера; None, если их не хватает."""
+        try:
+            cookies = {
+                c["name"]: c["value"]
+                for c in json.loads(text)
+                if c["name"] in cls.AUTH_COOKIES
+            }
+        except ValueError, KeyError, TypeError:
+            return None
+        # TODO: Проверить какие именно ключи cookie необходимы
+        return cookies if len(cookies) >= 2 else None
 
     @classmethod
     async def try_login(
