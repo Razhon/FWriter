@@ -7,6 +7,7 @@ import pytest
 
 from fwriter.core.api.client import FicbookAPI, Role
 from fwriter.core.api.errors import APIChangedError, LoginFailedError
+from fwriter.core.api.models import UserInfo
 
 BETA_PAGE = (
     Path(__file__).parent / "fixtures" / "assistant_fanfics-beta.html"
@@ -38,22 +39,6 @@ def test_beta_page():
     assert fics[0].title == "Фанфик 1"
     assert fics[1].chapters[0].id == 2002
     assert fics[1].chapters[0].title == "Глава 1. Название 1"
-
-
-def test_user_name_with_spaces():
-    pages = {
-        "/": '<div class="profile-area"><a href="/authors/42">x</a></div>',
-        "/authors/42": "<title>Серый – Кот – профиль автора фанфиков и ориджиналов"
-        " – Книга Фанфиков</title>",
-    }
-    api = FicbookAPI({})
-
-    async def fake_get(path: str) -> httpx.Response:
-        return httpx.Response(200, text=pages[path])
-
-    api._get = fake_get
-    user = asyncio.run(api.get_user_info())
-    assert (user.id, user.name) == (42, "Серый – Кот")
 
 
 def test_changed_layout_raises():
@@ -94,30 +79,40 @@ def test_parse_cookies(text: str, expected: dict[str, str] | None):
     assert FicbookAPI.parse_cookies(text) == expected
 
 
+PROFILE = '<div class="profile-area"><a href="/home/news">x</a><a href="/authors/42">x</a></div>'
+AVATAR = '<a class="btn-top-bar-profile-menu"><img alt=" Серый – Кот "></a>'
+HOME_URL = "https://ficbook.net/"
+
+
 @pytest.mark.parametrize(
     ("response", "ok"),
     [
-        (httpx.Response(200, json={"result": True}), True),
-        (httpx.Response(200, json={"result": False}), False),
-        (httpx.Response(200, json={"result": "yes"}), False),
+        (httpx.Response(200, text=AVATAR + PROFILE), True),
+        (httpx.Response(200, text=AVATAR), False),  # не вошли
+        (httpx.Response(200, text=PROFILE), False),  # шапка поменялась
         (httpx.Response(200, text="<html>Cloudflare</html>"), False),
+        (httpx.Response(403, request=httpx.Request("GET", HOME_URL)), False),
     ],
 )
 def test_login(monkeypatch, response: httpx.Response, ok: bool):
     closed: list[bool] = []
 
-    async def fake_post(self, path: str) -> httpx.Response:
+    async def fake_get(self, path: str) -> httpx.Response:
+        assert path == "/"
+        if response.status_code != 200:
+            response.raise_for_status()
         return response
 
     async def fake_close(self) -> None:
         closed.append(True)
 
-    monkeypatch.setattr(FicbookAPI, "_post", fake_post)
+    monkeypatch.setattr(FicbookAPI, "_get", fake_get)
     monkeypatch.setattr(FicbookAPI, "close", fake_close)
     login = FicbookAPI.login({})
 
     if ok:
-        assert isinstance(asyncio.run(login), FicbookAPI)
+        api = asyncio.run(login)
+        assert api.user == UserInfo(42, "Серый – Кот")
         assert not closed
     else:
         with pytest.raises(LoginFailedError):

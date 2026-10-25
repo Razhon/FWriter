@@ -76,63 +76,37 @@ class FicbookAPI:
         return api
 
     async def _check_login(self) -> None:
+        """Вход проверяется по главной, заодно пользователь берётся."""
         try:
-            response = await self._post("/home/messaging/gettoken")
-            data = response.json()
-        except (httpx.HTTPError, ValueError) as e:
+            response = await self._get("/")
+            self.user = self._parse_user(response.text)
+        except (httpx.HTTPError, FicbookAPIError) as e:
             raise LoginFailedError(str(e)) from e
-        if not (isinstance(data, dict) and data.get("result") is True):
-            raise LoginFailedError(f"{response.status_code} {response.text}")
 
     async def close(self) -> None:
         await self.client.aclose()
 
     async def get_user_info(self) -> UserInfo:
-        if self.user:
-            return self.user
-
-        async def get_user_id() -> int:
-            response = await self._get("/")
-
-            soup = BeautifulSoup(response.text, "html.parser")
-            profile_area = soup.find("div", class_="profile-area")
-            if not profile_area:
-                raise UserNotLoggedInError(
-                    "На главной нет блока профиля: cookies недействительны"
-                )
-
-            links = [
-                str(a.get("href", "")) for a in profile_area.find_all("a", limit=4)
-            ]
-
-            for link in links:
-                match = self._USER_ID_RE.search(link)
-                if match:
-                    return int(match.group(1))
-            raise UserNotLoggedInError("Не найден id пользователя в блоке профиля")
-
-        async def get_user_name(user_id: int) -> str:
-            response = await self._get(f"/authors/{user_id!s}")
-
-            soup = BeautifulSoup(response.text, "html.parser")
-            title = soup.title
-            if not title or not title.string:
-                raise UserNotLoggedInError("Не найдено имя на странице автора")
-
-            # "<ник> – профиль автора фанфиков и ориджиналов – Книга Фанфиков"; в нике могут быть пробелы и тире
-            name, sep, _ = title.string.partition(" – профиль автора")
-            if not sep:
-                raise APIChangedError(
-                    f"Неожиданный заголовок страницы автора: {title.string}"
-                )
-            return name.strip()
-
-        user_id = await get_user_id()
-        user_name = await get_user_name(user_id)
-
-        self.user = UserInfo(user_id, user_name)
-
+        if not self.user:  # после login() уже заполнен
+            self.user = self._parse_user((await self._get("/")).text)
         return self.user
+
+    @classmethod
+    def _parse_user(cls, html: str) -> UserInfo:
+        """Id и ник из шапки любой страницы, где пользователь вошёл."""
+        soup = BeautifulSoup(html, "html.parser")
+        profile_area = soup.find("div", class_="profile-area")
+        if not profile_area:
+            raise UserNotLoggedInError(
+                "На странице нет блока профиля: cookies недействительны"
+            )
+        link = req(profile_area.select_one('a[href*="/authors/"]'), "ссылка на профиль")
+        match = req(cls._USER_ID_RE.search(str(link.get("href", ""))), "id автора")
+        avatar = req(
+            soup.select_one(".btn-top-bar-profile-menu img[alt]"), "аватар с ником"
+        )
+        name = req(str(avatar.get("alt", "")).strip(), "ник в аватаре")
+        return UserInfo(int(match.group(1)), name)
 
     async def get_fics(self, role: Role) -> list[Fic]:
         """Список фанфиков с правами role (ключ FIC_LISTS)."""

@@ -38,8 +38,8 @@ class FWriterApp(App):
         try:
             api = await FicbookAPI.login(cookies, user_agent)
         except LoginFailedError as e:
-            self.notify(f"Не удалось войти: {e}", severity="warning", markup=False)
             self.switch_mode("login")
+            self.push_screen(ErrorScreen(f"Не удалось войти: {e}"))
             return
         self.install_screen(MainScreen(api), name="main_screen")
         self.switch_mode("main")
