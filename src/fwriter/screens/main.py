@@ -1,10 +1,10 @@
 from functools import partial
-from typing import Self
+from typing import ClassVar, Self
 
 import httpx
 from textual import events
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Center, VerticalScroll
 from textual.message import Message
 from textual.screen import Screen
@@ -25,7 +25,6 @@ FIC_SECTIONS = [
 
 
 class ClickableLabel(Widget, can_focus=True):
-
     DEFAULT_CSS = """
     ClickableLabel {
         width: auto;
@@ -52,9 +51,11 @@ class ClickableLabel(Widget, can_focus=True):
     
     
     """
-    
-    BINDINGS = [Binding("enter", "press", "Press ClickableLabel", show=False)]
-    
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("enter", "press", "Press ClickableLabel", show=False)
+    ]
+
     class Pressed(Message):
         def __init__(self, clabel: ClickableLabel) -> None:
             self.clabel: ClickableLabel = clabel
@@ -69,14 +70,14 @@ class ClickableLabel(Widget, can_focus=True):
         self.active_effect_duration = 0.2
         super().__init__(classes=classes)
 
-    def compose(self) -> ComposeResult:  
+    def compose(self) -> ComposeResult:
         yield Label(self.input_label, classes="clickable_label")
-        
+
     async def _on_click(self, event: events.Click) -> None:
         event.stop()
         if not self.has_class("-active"):
             self.press()
-            
+
     def press(self) -> Self:
         if self.disabled or not self.display:
             return self
@@ -85,19 +86,18 @@ class ClickableLabel(Widget, can_focus=True):
         # ...and let other components know that we've just been clicked:
         self.post_message(ClickableLabel.Pressed(self))
         return self
-    
+
     def _start_active_affect(self) -> None:
         if self.active_effect_duration > 0:
             self.add_class("-active")
             self.set_timer(
                 self.active_effect_duration, partial(self.remove_class, "-active")
             )
-    
+
     def action_press(self) -> None:
         if not self.has_class("-active"):
             self.press()
-        
-    
+
 
 class StartPageTab(TabPane):
     def __init__(self, api: FicbookAPI) -> None:
@@ -118,8 +118,13 @@ class StartPageTab(TabPane):
 
             def gen_fic_collapsible(fic: Fic, classes: str) -> Collapsible:
                 return Collapsible(
-                    *[ClickableLabel(ch.title, classes="chapter_btn") for ch in fic.chapters],
-                    ClickableLabel("[bold]Новая глава ->[/]", classes="new_chapter_btn"), # TODO отключить для всех, кроме автора/соавтора с правами редактирования
+                    *[
+                        ClickableLabel(ch.title, classes="chapter_btn")
+                        for ch in fic.chapters
+                    ],
+                    ClickableLabel(
+                        "[bold]Новая глава ->[/]", classes="new_chapter_btn"
+                    ),  # TODO отключить для всех, кроме автора/соавтора с правами редактирования
                     title=fic.title,
                     classes=classes,
                 )
@@ -128,13 +133,16 @@ class StartPageTab(TabPane):
                 fics = await self.api.get_fics(role)
                 if not fics:
                     continue
-                
-                if fics_container.children: # разделитель
+
+                if fics_container.children:  # разделитель
                     await fics_container.mount(Rule())
-                    
+
                 await fics_container.mount(
                     Label(label, classes="fics_collapsibles_label"),
-                    *[gen_fic_collapsible(fic, f"{role}_fics_collapsible") for fic in fics],
+                    *[
+                        gen_fic_collapsible(fic, f"{role}_fics_collapsible")
+                        for fic in fics
+                    ],
                 )
         except (FicbookAPIError, httpx.HTTPError) as e:
             self.app.push_screen(ErrorScreen(f"{type(e).__name__}: {e}"))
@@ -150,4 +158,3 @@ class MainScreen(Screen):
     def compose(self) -> ComposeResult:
         with TabbedContent():
             yield StartPageTab(self.api)
-

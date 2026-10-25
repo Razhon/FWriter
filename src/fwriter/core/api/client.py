@@ -65,16 +65,27 @@ class FicbookAPI:
     async def try_login(
         cls, cookies: dict[str, str], user_agent: str | None = None
     ) -> LoginResult:
+        """Проверяет cookies. Успех — отдаёт готовый API, неудача — закрывает его."""
         api = cls(cookies, user_agent)
-        try:
-            response = await api._post("/home/messaging/gettoken")
-            
-            if bool(response.json().get("result") is True):
-                return LoginSuccess(True, api)
-        except (httpx.HTTPError, ValueError) as e: 
-            return LoginFailure(False, str(e))
+        error = await api._check_login()
+        if error is None:
+            return LoginSuccess(True, api)
 
-        return LoginFailure(False, f"{response.status_code} {response.text}")
+        await api.close()
+        return LoginFailure(False, error)
+
+    async def _check_login(self) -> str | None:
+        """None, если cookies рабочие, иначе текст ошибки."""
+        try:
+            response = await self._post("/home/messaging/gettoken")
+            if response.json().get("result") is True:
+                return None
+            return f"{response.status_code} {response.text}"
+        except (httpx.HTTPError, ValueError) as e:
+            return str(e)
+
+    async def close(self) -> None:
+        await self.client.aclose()
 
     async def get_user_info(self) -> UserInfo:
         if self.user:
@@ -127,7 +138,9 @@ class FicbookAPI:
 
         fics: list[Fic] = []
         for fic_unparsed in fics_unparsed:
-            fic_id_raw = req(str(fic_unparsed.get("data-id", "")), "id фанфика (data-id)")
+            fic_id_raw = req(
+                str(fic_unparsed.get("data-id", "")), "id фанфика (data-id)"
+            )
             id_ = int(fic_id_raw)
 
             title_unparsed = req(
@@ -144,7 +157,9 @@ class FicbookAPI:
                 chapters_links_unparsed = content_list_unparsed.find_all("a")
                 for ch_link in chapters_links_unparsed:
                     href = str(ch_link.get("href", ""))
-                    match = req(self._CHAPTER_RE.search(href), f"ссылка на главу ({href})")
+                    match = req(
+                        self._CHAPTER_RE.search(href), f"ссылка на главу ({href})"
+                    )
                     if match.group(1) != fic_id_raw:
                         raise APIChangedError(
                             f"Глава {href} не относится к фанфику {fic_id_raw}"
@@ -176,4 +191,3 @@ class FicbookAPI:
         response = await self.client.post(*args, **kwargs)
         response.raise_for_status()
         return response
-    

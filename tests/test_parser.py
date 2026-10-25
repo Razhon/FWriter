@@ -7,9 +7,9 @@ import pytest
 from fwriter.core.api.client import FicbookAPI
 from fwriter.core.api.errors import APIChangedError
 
-BETA_PAGE = (Path(__file__).parent / "fixtures" / "assistant_fanfics-beta.html").read_text(
-    encoding="utf-8"
-)
+BETA_PAGE = (
+    Path(__file__).parent / "fixtures" / "assistant_fanfics-beta.html"
+).read_text(encoding="utf-8")
 
 
 def parse(html: str, role: str = "beta"):
