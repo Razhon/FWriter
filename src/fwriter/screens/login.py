@@ -39,7 +39,7 @@ class LoginScreen(Screen):
         if event.button.id != "login":
             return
         event.button.disabled = True
-        
+
         cookies = None
         cookies_json = None
         try:
@@ -57,7 +57,7 @@ class LoginScreen(Screen):
         except (json.JSONDecodeError, KeyError, TypeError):
             pass
 
-        if cookies_json is None or len(cookies_json.keys()) < 2:
+        if cookies_json is None or len(cookies_json.keys()) < 2: # TODO: Проверить какие именно ключи cookie необходимы
             event.button.disabled = False
             self.notify(
                 f"Неверные cookies! Нужны: {', '.join(sorted(FicbookAPI.AUTH_COOKIES))}",

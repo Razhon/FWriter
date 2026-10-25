@@ -16,6 +16,13 @@ from ..core.api.errors import FicbookAPIError
 from ..core.api.models import Fic
 from .error import ErrorScreen
 
+FIC_SECTIONS = [
+    ("author", "Ваши фанфики:"),
+    ("coauthor", "Фанфики доступные вам, как соавтору или сопереводчику:"),
+    ("beta", "Фанфики доступные вам, как бете:"),
+    ("gamma", "Фанфики доступные вам, как гамме:"),
+]
+
 
 class ClickableLabel(Widget, can_focus=True):
 
@@ -112,37 +119,22 @@ class StartPageTab(TabPane):
             def gen_fic_collapsible(fic: Fic, classes: str) -> Collapsible:
                 return Collapsible(
                     *[ClickableLabel(ch.title, classes="chapter_btn") for ch in fic.chapters],
-                    ClickableLabel("[bold]Новая глава ->[/]", classes="new_chapter_btn"),
+                    ClickableLabel("[bold]Новая глава ->[/]", classes="new_chapter_btn"), # TODO отключить для всех, кроме автора/соавтора с правами редактирования
                     title=fic.title,
                     classes=classes,
                 )
 
-            author_fics = await self.api.get_author_fics()
-            if author_fics:
+            for role, label in FIC_SECTIONS:
+                fics = await self.api.get_fics(role)
+                if not fics:
+                    continue
+                
+                if fics_container.children: # разделитель
+                    await fics_container.mount(Rule())
+                    
                 await fics_container.mount(
-                    Label("Ваши фанфики:", classes="fics_collapsibles_label")
-                )
-                await fics_container.mount(
-                    *[
-                        gen_fic_collapsible(fic, "author_fic_collapsible")
-                        for fic in author_fics
-                    ]
-                )
-
-            beta_fics = await self.api.get_beta_fics()
-            if beta_fics:
-                await fics_container.mount(
-                    Rule(),
-                    Label(
-                        "Фанфики доступные вам, как бете:",
-                        classes="fics_collapsibles_label",
-                    )
-                )
-                await fics_container.mount(
-                    *[
-                        gen_fic_collapsible(fic, "beta_fics_collapsible")
-                        for fic in beta_fics
-                    ]
+                    Label(label, classes="fics_collapsibles_label"),
+                    *[gen_fic_collapsible(fic, f"{role}_fics_collapsible") for fic in fics],
                 )
         except (FicbookAPIError, httpx.HTTPError) as e:
             self.app.push_screen(ErrorScreen(f"{type(e).__name__}: {e}"))
@@ -159,7 +151,3 @@ class MainScreen(Screen):
         with TabbedContent():
             yield StartPageTab(self.api)
 
-    # async def on_mount(self) -> None:
-    #     print(await self.api.get_user_info())
-        # print(await self.api.get_author_fics())
-        # print(await self.api.get_beta_fics())

@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from typing import Literal, TypeVar
+from typing import ClassVar, Literal, TypeVar
 
 import httpx
 from bs4 import BeautifulSoup
@@ -39,6 +39,15 @@ class FicbookAPI:
     BASE_URL = "https://ficbook.net"
     # Только cookies сессии: полный экспорт из браузера не влезает в keyring на Windows
     AUTH_COOKIES = frozenset({"rme", "PHPSESSID", "cf_clearance"})
+
+    # Роль -> страница со списком. Ссылки на главы на всех страницах одинаковые.
+    FIC_LISTS: ClassVar[dict[str, str]] = {
+        "author": "/home/myfics",
+        # TODO: соавтор и сопереводчик на одной странице, разделить роли, не на чем проверить
+        "coauthor": "/home/assistant_fanfics/coauthor",
+        "beta": "/home/assistant_fanfics/beta",
+        "gamma": "/home/assistant_fanfics/gamma",
+    }
 
     _USER_ID_RE = re.compile(r"/authors/(\d+)")
     _CHAPTER_RE = re.compile(r"/home/myfics/(\d+)/parts/(\d+)")
@@ -110,57 +119,9 @@ class FicbookAPI:
 
         return self.user
 
-    async def get_author_fics(self) -> list[Fic]:
-        response = await self._get("/home/myfics")
-
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        fics_unparsed = soup.find_all("div", class_="myfic")
-
-        fics: list[Fic] = []
-        for fic_unparsed in fics_unparsed:
-            fic_id_raw = req(str(fic_unparsed.get("data-id", "")), "id фанфика (data-id)")
-            id_ = int(fic_id_raw)
-
-            title_unparsed = req(
-                fic_unparsed.select_one("div.myfic-header.word-break > span > a"),
-                "ссылка с названием фанфика",
-            )
-            title = req(title_unparsed.string, "текст названия фанфика")
-
-            chapters: list[SlimChapterInfo] = []
-            content_list_unparsed = fic_unparsed.select_one(
-                "div.fanfic-content > div.fanfic-content-list"
-            )
-            if content_list_unparsed:
-                chapters_links_unparsed = content_list_unparsed.find_all("a")
-                for ch_link in chapters_links_unparsed:
-                    href = str(ch_link.get("href", ""))
-                    match = req(self._CHAPTER_RE.search(href), f"ссылка на главу ({href})")
-                    if match.group(1) != fic_id_raw:
-                        raise APIChangedError(
-                            f"Глава {href} не относится к фанфику {fic_id_raw}"
-                        )
-
-                    chapter_id = int(match.group(2))
-                    chapter_title_unparsed = req(
-                        ch_link.find("span"), f"название главы {chapter_id}"
-                    )
-
-                    chapter_title = req(
-                        next(chapter_title_unparsed.stripped_strings, "")
-                        .replace("\n", "")
-                        .strip(),
-                        f"текст названия главы {chapter_id}",
-                    )
-
-                    chapters.append(SlimChapterInfo(chapter_id, chapter_title))
-
-            fics.append(Fic(id=id_, title=title, chapters=chapters))
-        return fics
-
-    async def get_beta_fics(self) -> list[Fic]:
-        response = await self._get("/home/assistant_fanfics/beta")
+    async def get_fics(self, role: str) -> list[Fic]:
+        """Список фанфиков с правами role (ключ FIC_LISTS)."""
+        response = await self._get(self.FIC_LISTS[role])
 
         soup = BeautifulSoup(response.text, "html.parser")
 
