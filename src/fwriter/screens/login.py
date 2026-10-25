@@ -1,10 +1,11 @@
-from textual import log, on
+from textual import on
 from textual.app import ComposeResult
 from textual.containers import Center
 from textual.screen import Screen
 from textual.widgets import Button, Input
 
 from ..core.api import *
+from ..core.api.errors import LoginFailedError
 from ..secrets import SecretStorage
 from .error import ErrorScreen
 from .main import MainScreen
@@ -51,11 +52,11 @@ class LoginScreen(Screen):
 
         user_agent = self.query_one("#user_agent", Input).value
 
-        result = await FicbookAPI.try_login(cookies, user_agent)
-        log(result)
-        if result.ok is False:
+        try:
+            api = await FicbookAPI.login(cookies, user_agent)
+        except LoginFailedError as e:
             event.button.disabled = False
-            self.app.push_screen(ErrorScreen(result.error))
+            self.app.push_screen(ErrorScreen(str(e)))
             return
 
         try:
@@ -68,5 +69,5 @@ class LoginScreen(Screen):
                 markup=False,
             )
 
-        self.app.install_screen(MainScreen(result.api), name="main_screen")
+        self.app.install_screen(MainScreen(api), name="main_screen")
         self.app.switch_mode("main")

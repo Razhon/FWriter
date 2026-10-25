@@ -13,11 +13,12 @@ from textual.widget import Widget
 from textual.widgets import Collapsible, Label, Rule, TabbedContent, TabPane
 
 from ..core.api import *
+from ..core.api.client import Role
 from ..core.api.errors import FicbookAPIError
 from ..core.api.models import Fic
 from .error import ErrorScreen
 
-FIC_SECTIONS = [
+FIC_SECTIONS: list[tuple[Role, str]] = [
     ("author", "Ваши фанфики:"),
     ("coauthor", "Фанфики доступные вам, как соавтору или сопереводчику:"),
     ("beta", "Фанфики доступные вам, как бете:"),
@@ -27,7 +28,7 @@ FIC_SECTIONS = [
 
 class ClickableLabel(Widget, can_focus=True):
     """Намеренный отдельный класс от Button, так легче"""
-    
+
     DEFAULT_CSS = """
     ClickableLabel {
         width: auto;
@@ -96,11 +97,13 @@ class StartPageTab(TabPane):
         yield VerticalScroll(classes="fics_container")
 
     def on_mount(self) -> None:
-        self.load()
+        self.load_user()
+        self.load_fics()
 
-    # воркер отменяется при удалении вкладки и до закрытия клиента в MainScreen.on_unmount
-    @work(exclusive=True)
-    async def load(self) -> None:
+    # воркеры отменяются при удалении вкладки и до закрытия клиента в MainScreen.on_unmount;
+    # разные group, иначе exclusive отменит соседа
+    @work(exclusive=True, group="user")
+    async def load_user(self) -> None:
         try:
             user = await self.api.get_user_info()
         except (FicbookAPIError, httpx.HTTPError) as e:
@@ -108,6 +111,8 @@ class StartPageTab(TabPane):
             return
         self.query_one("#greeting", Label).update(Content(f"Привет, {user.name}!"))
 
+    @work(exclusive=True, group="fics")
+    async def load_fics(self) -> None:
         fics_container = self.query_one(".fics_container", VerticalScroll)
 
         def gen_fic_collapsible(fic: Fic, classes: str) -> Collapsible:

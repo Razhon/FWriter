@@ -6,6 +6,7 @@ from textual.binding import BindingType
 from textual.screen import Screen
 
 from .core.api import *
+from .core.api.errors import LoginFailedError
 from .screens import *
 from .secrets import *
 
@@ -34,13 +35,14 @@ class FWriterApp(App):
             self.switch_mode("login")
             return
 
-        result = await FicbookAPI.try_login(cookies, user_agent)
-        if result.ok is True:
-            self.install_screen(MainScreen(result.api), name="main_screen")
-            self.switch_mode("main")
-        else:
-            self.notify(f"Не удалось войти: {result.error}", severity="warning", markup=False)
+        try:
+            api = await FicbookAPI.login(cookies, user_agent)
+        except LoginFailedError as e:
+            self.notify(f"Не удалось войти: {e}", severity="warning", markup=False)
             self.switch_mode("login")
+            return
+        self.install_screen(MainScreen(api), name="main_screen")
+        self.switch_mode("main")
 
 
 def main():

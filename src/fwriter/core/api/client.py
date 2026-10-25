@@ -1,6 +1,5 @@
 import json
 import re
-from dataclasses import dataclass
 from typing import ClassVar, Literal
 
 import httpx
@@ -9,20 +8,7 @@ from bs4 import BeautifulSoup
 from .errors import *
 from .models import Fic, SlimChapterInfo, UserInfo
 
-
-@dataclass(frozen=True)
-class LoginSuccess:
-    ok: Literal[True]
-    api: FicbookAPI
-
-
-@dataclass(frozen=True)
-class LoginFailure:
-    ok: Literal[False]
-    error: str
-
-
-LoginResult = LoginSuccess | LoginFailure
+Role = Literal["author", "coauthor", "beta", "gamma"]
 
 
 def req[T](value: T | None, what: str) -> T:
@@ -40,7 +26,7 @@ class FicbookAPI:
     AUTH_COOKIES = frozenset({"rme", "PHPSESSID", "cf_clearance"})
 
     # Роль -> страница со списком. Ссылки на главы на всех страницах одинаковые.
-    FIC_LISTS: ClassVar[dict[str, str]] = {
+    FIC_LISTS: ClassVar[dict[Role, str]] = {
         "author": "/home/myfics",
         # TODO: соавтор и сопереводчик на одной странице, разделить роли, не на чем проверить
         "coauthor": "/home/assistant_fanfics/coauthor",
@@ -77,28 +63,26 @@ class FicbookAPI:
         return cookies if len(cookies) >= 2 else None
 
     @classmethod
-    async def try_login(
+    async def login(
         cls, cookies: dict[str, str], user_agent: str | None = None
-    ) -> LoginResult:
-        """Проверяет cookies. Успех — отдаёт готовый API, неудача — закрывает его."""
+    ) -> FicbookAPI:
+        """Готовый API с проверенными cookies; иначе LoginFailedError."""
         api = cls(cookies, user_agent)
-        error = await api._check_login()
-        if error is None:
-            return LoginSuccess(True, api)
+        try:
+            await api._check_login()
+        except BaseException:  # клиент закрывается и при отмене
+            await api.close()
+            raise
+        return api
 
-        await api.close()
-        return LoginFailure(False, error)
-
-    async def _check_login(self) -> str | None:
-        """None, если cookies рабочие, иначе текст ошибки."""
+    async def _check_login(self) -> None:
         try:
             response = await self._post("/home/messaging/gettoken")
             data = response.json()
-            if isinstance(data, dict) and data.get("result") is True:
-                return None
-            return f"{response.status_code} {response.text}"
         except (httpx.HTTPError, ValueError) as e:
-            return str(e)
+            raise LoginFailedError(str(e)) from e
+        if not (isinstance(data, dict) and data.get("result") is True):
+            raise LoginFailedError(f"{response.status_code} {response.text}")
 
     async def close(self) -> None:
         await self.client.aclose()
@@ -150,7 +134,7 @@ class FicbookAPI:
 
         return self.user
 
-    async def get_fics(self, role: str) -> list[Fic]:
+    async def get_fics(self, role: Role) -> list[Fic]:
         """Список фанфиков с правами role (ключ FIC_LISTS)."""
         response = await self._get(self.FIC_LISTS[role])
 

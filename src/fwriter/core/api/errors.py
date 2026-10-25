@@ -8,3 +8,7 @@ class APIChangedError(FicbookAPIError):
 
 class UserNotLoggedInError(FicbookAPIError):
     pass
+
+
+class LoginFailedError(FicbookAPIError):
+    pass

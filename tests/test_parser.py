@@ -5,15 +5,15 @@ from pathlib import Path
 import httpx
 import pytest
 
-from fwriter.core.api.client import FicbookAPI
-from fwriter.core.api.errors import APIChangedError
+from fwriter.core.api.client import FicbookAPI, Role
+from fwriter.core.api.errors import APIChangedError, LoginFailedError
 
 BETA_PAGE = (
     Path(__file__).parent / "fixtures" / "assistant_fanfics-beta.html"
 ).read_text(encoding="utf-8")
 
 
-def parse(html: str, role: str = "beta"):
+def parse(html: str, role: Role = "beta"):
     api = FicbookAPI({})
     requested: list[str] = []
 
@@ -92,3 +92,34 @@ GOOD = {"rme": "1", "PHPSESSID": "2", "cf_clearance": "3"}
 )
 def test_parse_cookies(text: str, expected: dict[str, str] | None):
     assert FicbookAPI.parse_cookies(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("response", "ok"),
+    [
+        (httpx.Response(200, json={"result": True}), True),
+        (httpx.Response(200, json={"result": False}), False),
+        (httpx.Response(200, json={"result": "yes"}), False),
+        (httpx.Response(200, text="<html>Cloudflare</html>"), False),
+    ],
+)
+def test_login(monkeypatch, response: httpx.Response, ok: bool):
+    closed: list[bool] = []
+
+    async def fake_post(self, path: str) -> httpx.Response:
+        return response
+
+    async def fake_close(self) -> None:
+        closed.append(True)
+
+    monkeypatch.setattr(FicbookAPI, "_post", fake_post)
+    monkeypatch.setattr(FicbookAPI, "close", fake_close)
+    login = FicbookAPI.login({})
+
+    if ok:
+        assert isinstance(asyncio.run(login), FicbookAPI)
+        assert not closed
+    else:
+        with pytest.raises(LoginFailedError):
+            asyncio.run(login)
+        assert closed

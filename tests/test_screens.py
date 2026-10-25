@@ -9,6 +9,7 @@ from fwriter.core.api.errors import APIChangedError
 from fwriter.core.api.models import Fic, UserInfo
 from fwriter.run import FWriterApp
 from fwriter.screens import ErrorScreen, LoginScreen, MainScreen
+from fwriter.screens.main import FIC_SECTIONS
 from fwriter.secrets import SecretStorage
 
 
@@ -79,3 +80,7 @@ def test_failed_fic_list_keeps_others():
             assert any("сломалось" in line for line in log.lines)
 
     asyncio.run(run())
+
+
+def test_sections_match_api_roles():
+    assert [r for r, _ in FIC_SECTIONS] == list(FicbookAPI.FIC_LISTS)
