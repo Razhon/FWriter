@@ -28,7 +28,7 @@ class FicbookAPI:
     # Роль -> страница со списком. Ссылки на главы на всех страницах одинаковые.
     FIC_LISTS: ClassVar[dict[Role, str]] = {
         "author": "/home/myfics",
-        # TODO: соавтор и сопереводчик на одной странице, разделить роли, не на чем проверить
+        # TODO: соавтор и сопереводчик на одной странице, переводчик в myfics, разделить роли, не на чем проверить
         "coauthor": "/home/assistant_fanfics/coauthor",
         "beta": "/home/assistant_fanfics/beta",
         "gamma": "/home/assistant_fanfics/gamma",
