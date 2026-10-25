@@ -32,12 +32,12 @@ def test_beta_page():
     fics = parse(BETA_PAGE)
 
     assert [(f.id, len(f.chapters)) for f in fics] == [
-        (1001, 1),
-        (1002, 9),
-        (1003, 9),
+        ("1001", 1),
+        ("1002", 9),
+        ("1003", 9),
     ]
     assert fics[0].title == "Фанфик 1"
-    assert fics[1].chapters[0].id == 2002
+    assert fics[1].chapters[0].id == "2002"
     assert fics[1].chapters[0].title == "Глава 1. Название 1"
 
 

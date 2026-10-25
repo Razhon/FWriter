@@ -9,12 +9,12 @@ class UserInfo:
 
 @dataclass
 class SlimChapterInfo:
-    id: int
+    id: str
     title: str
 
 
 @dataclass
 class Fic:
-    id: int
+    id: str
     title: str
     chapters: list[SlimChapterInfo]

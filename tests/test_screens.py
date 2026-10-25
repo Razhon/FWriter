@@ -20,7 +20,7 @@ def test_titles_are_plain_text():
     api.user = UserInfo(1, tricky)
 
     async def fake_get_fics(role: str) -> list[Fic]:
-        return [Fic(1, tricky, [])] if role == "author" else []
+        return [Fic("1", tricky, [])] if role == "author" else []
 
     api.get_fics = fake_get_fics
 
@@ -60,7 +60,7 @@ def test_failed_fic_list_keeps_others():
     async def fake_get_fics(role: str) -> list[Fic]:
         if role == "coauthor":
             raise APIChangedError("сломалось")
-        return [Fic(1, role, [])]
+        return [Fic("1", role, [])]
 
     api.get_fics = fake_get_fics
     main = MainScreen(api)

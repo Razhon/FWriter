@@ -122,10 +122,9 @@ class FicbookAPI:
             fic_id_raw = req(
                 str(fic_unparsed.get("data-id", "")), "id фанфика (data-id)"
             )
-            # isdecimal, а не isdigit: "²" — digit, но int() его не примет
+            # isdecimal, а не isdigit: "²" - digit, но не цифра id
             if not fic_id_raw.isdecimal():
                 raise APIChangedError(f"Нечисловой id фанфика: {fic_id_raw}")
-            id_ = int(fic_id_raw)
 
             title_unparsed = req(
                 fic_unparsed.select_one("div.myfic-header.word-break > span > a"),
@@ -149,7 +148,7 @@ class FicbookAPI:
                             f"Глава {href} не относится к фанфику {fic_id_raw}"
                         )
 
-                    chapter_id = int(match.group(2))
+                    chapter_id = match.group(2)
                     chapter_title_unparsed = req(
                         ch_link.find("span"), f"название главы {chapter_id}"
                     )
@@ -161,7 +160,7 @@ class FicbookAPI:
 
                     chapters.append(SlimChapterInfo(chapter_id, chapter_title))
 
-            fics.append(Fic(id=id_, title=title, chapters=chapters))
+            fics.append(Fic(id=fic_id_raw, title=title, chapters=chapters))
         return fics
 
     async def _get(self, *args, **kwargs) -> httpx.Response:

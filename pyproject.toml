@@ -1,7 +1,7 @@
 [project]
 name = "fwriter"
 version = "0.1.0"
-description = "Add your description here"
+description = "Терминальный (TUI) редактор глав Ficbook.net с локальной историей версий — для авторов и их помощников: соавторов, переводчиков, бет и гамм."
 readme = "README.md"
 authors = [
     { name = "Razhon", email = "me@razhon.xyz" }
