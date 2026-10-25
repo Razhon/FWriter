@@ -78,7 +78,8 @@ class FicbookAPI:
         """None, если cookies рабочие, иначе текст ошибки."""
         try:
             response = await self._post("/home/messaging/gettoken")
-            if response.json().get("result") is True:
+            data = response.json()
+            if isinstance(data, dict) and data.get("result") is True:
                 return None
             return f"{response.status_code} {response.text}"
         except (httpx.HTTPError, ValueError) as e:
@@ -147,6 +148,9 @@ class FicbookAPI:
             fic_id_raw = req(
                 str(fic_unparsed.get("data-id", "")), "id фанфика (data-id)"
             )
+            # isdecimal, а не isdigit: "²" — digit, но int() его не примет
+            if not fic_id_raw.isdecimal():
+                raise APIChangedError(f"Нечисловой id фанфика: {fic_id_raw}")
             id_ = int(fic_id_raw)
 
             title_unparsed = req(

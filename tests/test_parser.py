@@ -60,3 +60,10 @@ def test_changed_layout_raises():
 
     with pytest.raises(APIChangedError, match="названием фанфика"):
         parse(broken)
+
+
+def test_non_numeric_fic_id_raises():
+    broken = BETA_PAGE.replace('data-id="1001"', 'data-id="fic-1001"')
+
+    with pytest.raises(APIChangedError, match="Нечисловой id"):
+        parse(broken)
