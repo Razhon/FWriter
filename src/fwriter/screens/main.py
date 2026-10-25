@@ -6,6 +6,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Center, VerticalScroll
+from textual.content import Content
 from textual.message import Message
 from textual.screen import Screen
 from textual.widget import Widget
@@ -95,7 +96,7 @@ class StartPageTab(TabPane):
     async def on_mount(self) -> None:
         try:
             user = await self.api.get_user_info()
-            self.query_one("#greeting", Label).update(f"Привет, {user.name}!")
+            self.query_one("#greeting", Label).update(Content(f"Привет, {user.name}!"))
 
             fics_container = self.query_one(".fics_container", VerticalScroll)
 
@@ -105,12 +106,13 @@ class StartPageTab(TabPane):
                         ClickableLabel(ch.title, classes="chapter_btn")
                         for ch in fic.chapters
                     ],
-                    ClickableLabel(
+                    ClickableLabel(  # TODO отключить для всех, кроме автора/соавтора с правами редактирования
                         "[bold]Новая глава ->[/]",
                         classes="new_chapter_btn",
                         markup=True,
-                    ),  # TODO отключить для всех, кроме автора/соавтора с правами редактирования
-                    title=fic.title,
+                    ),
+                    # типизирует title как str, но принимает Content; str разбирается как разметка
+                    title=Content(fic.title),  # pyright: ignore[reportArgumentType]
                     classes=classes,
                 )
 

@@ -85,6 +85,7 @@ class LoginScreen(Screen):
                 f"Не удалось сохранить вход: {e}. В следующий раз придётся войти снова.",
                 severity="warning",
                 timeout=6,
+                markup=False,
             )
 
         self.app.install_screen(MainScreen(result.api), name="main_screen")
