@@ -1,7 +1,5 @@
 StartPageTab {
-    # layout: vertical;
     align: center middle;
-    layers: below above;
 }
 
 Rule {
@@ -17,25 +15,17 @@ Label {
 }
 
 .fics_container {
-    
     content-align: center middle;
-    # height: auto;
-    # width: 33%;
-    # background: #f00;
-    # min-width: 40;
-    # margin: 0 33;
     padding: 0 12;
     overflow-y: auto;
     scrollbar-background: #0b0b0b;
 }
 
 .fics_collapsibles_label {
-    # background: #f00;
     margin: 1 1 1 1;
 }
 
 .chapter_btn {
-    # background: #f00;
     height: 2;
     margin: 0;
 }

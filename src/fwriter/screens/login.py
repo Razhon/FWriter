@@ -15,7 +15,7 @@ class LoginScreen(Screen):
     ENABLE_COMMAND_PALETTE = False
 
     def compose(self) -> ComposeResult:
-        yield Center(Input(placeholder="Кукисы", id="cookies"))
+        yield Center(Input(placeholder="Кукисы", id="cookies", password=True))
         yield Center(Input(placeholder="User-Agent", id="user_agent"))
         yield Center(Button(label="Войти", id="login", disabled=True))
 

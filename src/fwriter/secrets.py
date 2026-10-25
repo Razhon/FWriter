@@ -7,13 +7,13 @@ class SecretStorage:
     SERVICE_NAME = "fwriter"
 
     @classmethod
-    def get_auth(cls) -> tuple[dict | None, str | None]:
+    def get_auth(cls) -> tuple[dict[str, str] | None, str | None]:
         cookies = cls._get("cookies")
         if cookies:
             cookies = json.loads(cookies)
 
         return (cookies or None, cls._get("user_agent"))
-    
+
     @classmethod
     def set_auth(cls, cookies: dict[str, str], user_agent: str) -> None:
         cls._set("cookies", json.dumps(cookies))

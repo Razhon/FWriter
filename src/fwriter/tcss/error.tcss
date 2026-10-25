@@ -5,8 +5,6 @@ ErrorScreen {
 #dialog {
     height: auto;
     max-height: 35;
-    
-    # width: 2w;
     min-width: 40;
     max-width: 80;
 
@@ -26,7 +24,6 @@ ErrorScreen {
 
     margin: 1 0;
 
-    # scrollbar-background: $surface;
     overflow-x: auto;
     overflow-y: auto;
 }
