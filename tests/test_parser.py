@@ -1,6 +1,8 @@
 import asyncio
 import json
+from collections.abc import Callable, Coroutine
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -13,9 +15,8 @@ from fwriter.core.api.errors import (
 )
 from fwriter.core.api.models import Chapter, UserInfo
 
-BETA_PAGE = (
-    Path(__file__).parent / "fixtures" / "assistant_fanfics-beta.html"
-).read_text(encoding="utf-8")
+FIXTURES = Path(__file__).parent / "fixtures"
+BETA_PAGE = (FIXTURES / "assistant_fanfics-beta.html").read_text(encoding="utf-8")
 
 
 def mock_api(handler) -> FicbookAPI:
@@ -26,16 +27,23 @@ def mock_api(handler) -> FicbookAPI:
     return api
 
 
-def parse(html: str, role: Role = "beta"):
+def fetch[T](
+    html: str, call: Callable[[FicbookAPI], Coroutine[Any, Any, T]], path: str
+) -> T:
+    """Вызов API на странице html с проверкой, что запрошен ровно path."""
     requested: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requested.append(request.url.path)
         return httpx.Response(200, text=html)
 
-    fics = asyncio.run(mock_api(handler).get_fics(role))
-    assert requested == [FicbookAPI.FIC_LISTS[role]]
-    return fics
+    result = asyncio.run(call(mock_api(handler)))
+    assert requested == [path]
+    return result
+
+
+def parse(html: str, role: Role = "beta"):
+    return fetch(html, lambda api: api.get_fics(role), FicbookAPI.FIC_LISTS[role])
 
 
 def test_beta_page():
@@ -152,19 +160,8 @@ def test_post_redirect(location: str, logged_out: bool):
         assert asyncio.run(post).status_code == 302
 
 
-FIXTURES = Path(__file__).parent / "fixtures"
-
-
 def get_chapter(html: str) -> Chapter:
-    requested: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requested.append(request.url.path)
-        return httpx.Response(200, text=html)
-
-    chapter = asyncio.run(mock_api(handler).get_chapter("1", "2"))
-    assert requested == ["/home/myfics/1/parts/2"]
-    return chapter
+    return fetch(html, lambda api: api.get_chapter("1", "2"), "/home/myfics/1/parts/2")
 
 
 def chapter_page(name: str) -> str:
@@ -203,6 +200,7 @@ def test_get_chapter_beta():
     [
         ('id="savePartForm"', 'id="renamedForm"', "savePartForm"),
         ("initial-value=", "data-value=", "initial-value"),
+        ('checked="" name="param"', 'name="param"', "статус"),
     ],
 )
 def test_get_chapter_changed_layout_raises(old: str, new: str, what: str):

@@ -176,8 +176,12 @@ class FicbookAPI:
         if content is None:  # пустой текст допустим, отсутствие атрибута — нет
             raise APIChangedError("Не найдено на странице: текст главы (initial-value)")
         title_input = req(form.find("input", attrs={"name": "title"}), "поле названия")
-        param = form.find("input", attrs={"name": "param", "checked": True})
-        status = str(param.get("value", "")) if param else None
+        # кнопок статуса нет у беты; если они есть, одна обязана быть отмечена
+        params = form.find_all("input", attrs={"name": "param"})
+        status = None
+        if params:
+            checked = next((p for p in params if p.has_attr("checked")), None)
+            status = str(req(checked, "отмеченный статус главы").get("value", ""))
         if status is not None and not status.isdecimal():
             raise APIChangedError(f"Нечисловой статус главы: {status}")
 
