@@ -11,7 +11,7 @@ from fwriter.core.api.errors import (
     LoginFailedError,
     UserNotLoggedInError,
 )
-from fwriter.core.api.models import UserInfo
+from fwriter.core.api.models import Chapter, UserInfo
 
 BETA_PAGE = (
     Path(__file__).parent / "fixtures" / "assistant_fanfics-beta.html"
@@ -150,3 +150,61 @@ def test_post_redirect(location: str, logged_out: bool):
             asyncio.run(post)
     else:  # откат отвечает 302 на главу
         assert asyncio.run(post).status_code == 302
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def get_chapter(html: str) -> Chapter:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, text=html)
+
+    chapter = asyncio.run(mock_api(handler).get_chapter("1", "2"))
+    assert requested == ["/home/myfics/1/parts/2"]
+    return chapter
+
+
+def chapter_page(name: str) -> str:
+    return (FIXTURES / f"myfics-00000000-parts-00000000_{name}_raw.html").read_text(
+        encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "status", "last_line"),
+    [("author_draft", 1, "<tab>Долор 2"), ("author_published", 2, "<tab>Долор 4")],
+)
+def test_get_chapter_author(name: str, status: int, last_line: str):
+    chapter = get_chapter(chapter_page(name))
+
+    assert chapter == Chapter(
+        title="Лорем ипсум",
+        content=f"Лорем <b>ипсум</b>\n{last_line}",
+        title_editable=True,
+        status=status,
+    )
+
+
+def test_get_chapter_beta():
+    chapter = get_chapter(chapter_page("beta"))
+
+    assert chapter.title == "Лорем 1. Ипсум долор"
+    assert not chapter.title_editable
+    assert chapter.status is None
+    assert chapter.content.startswith("Лорем ипсум долор, сит амет")
+    assert chapter.content.endswith("долор сит амет консектетур адиписцинг.")
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "what"),
+    [
+        ('id="savePartForm"', 'id="renamedForm"', "savePartForm"),
+        ("initial-value=", "data-value=", "initial-value"),
+    ],
+)
+def test_get_chapter_changed_layout_raises(old: str, new: str, what: str):
+    with pytest.raises(APIChangedError, match=what):
+        get_chapter(chapter_page("author_draft").replace(old, new, 1))

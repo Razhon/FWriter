@@ -6,7 +6,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from .errors import *
-from .models import Fic, SlimChapterInfo, UserInfo
+from .models import Chapter, Fic, SlimChapterInfo, UserInfo
 
 Role = Literal["author", "coauthor", "beta", "gamma"]
 
@@ -164,6 +164,29 @@ class FicbookAPI:
 
             fics.append(Fic(id=fic_id_raw, title=title, chapters=chapters))
         return fics
+
+    async def get_chapter(self, fic_id: str, chapter_id: str) -> Chapter:
+        """Текст, название и статус главы со страницы её редактирования."""
+        response = await self._get(f"/home/myfics/{fic_id}/parts/{chapter_id}")
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        form = req(soup.find("form", id="savePartForm"), "форма главы (savePartForm)")
+        editor = req(form.find("fanfic-editor"), "редактор главы (fanfic-editor)")
+        content = editor.get("initial-value")
+        if content is None:  # пустой текст допустим, отсутствие атрибута — нет
+            raise APIChangedError("Не найдено на странице: текст главы (initial-value)")
+        title_input = req(form.find("input", attrs={"name": "title"}), "поле названия")
+        param = form.find("input", attrs={"name": "param", "checked": True})
+        status = str(param.get("value", "")) if param else None
+        if status is not None and not status.isdecimal():
+            raise APIChangedError(f"Нечисловой статус главы: {status}")
+
+        return Chapter(
+            title=str(title_input.get("value", "")),
+            content=str(content),
+            title_editable=not title_input.has_attr("disabled"),
+            status=int(status) if status is not None else None,
+        )
 
     async def _get(self, *args, **kwargs) -> httpx.Response:
         response = await self.client.get(*args, **kwargs)
