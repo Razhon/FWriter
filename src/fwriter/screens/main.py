@@ -12,25 +12,25 @@ from textual.screen import Screen
 from textual.widgets import Collapsible, Label, Rule, TabbedContent, TabPane, Tabs
 
 from ..core.api.client import FicbookAPI
-from ..core.api.errors import (
-    FicbookAPIError,
-    NetworkError,
-    SiteError,
-    UserNotLoggedInError,
-)
+from ..core.api.errors import FicbookAPIError, NetworkError, UserNotLoggedInError
 from ..core.api.models import Fic, Role, SlimChapterInfo, can_manage
 from ..core.storage import DATA_DIR, ChapterMeta, ChapterStorage
+from .api_errors import report_api_error
 from .chapter import ChapterTab
-from .error import ErrorScreen
 
 log = logging.getLogger(__name__)
 
 FIC_SECTIONS: list[tuple[Role, str]] = [
-    ("author", "Ваши фанфики:"),
-    ("coauthor", "Фанфики доступные вам, как соавтору или сопереводчику:"),
-    ("beta", "Фанфики доступные вам, как бете:"),
-    ("gamma", "Фанфики доступные вам, как гамме:"),
+    ("author", "Ваши фанфики"),
+    ("coauthor", "Фанфики доступные вам, как соавтору или сопереводчику"),
+    ("beta", "Фанфики доступные вам, как бете"),
+    ("gamma", "Фанфики доступные вам, как гамме"),
 ]
+
+# без сессии и без связи следующие запросы упадут так же
+# shortcut: без связи загрузка просто обрывается; по дизайну - списки из fic.json,
+# добавить вместе с офлайн-режимом
+STOP_LOADING = (UserNotLoggedInError, NetworkError)
 
 
 class ClickableLabel(Label, can_focus=True):
@@ -72,7 +72,7 @@ class ClickableLabel(Label, can_focus=True):
         self.action_press()
 
     def action_press(self) -> None:
-        # Пока идёт подсветка нажатия, повторные нажатия игнорируются
+        # пока идёт подсветка нажатия, повторные нажатия игнорируются
         if self.disabled or not self.display or self.has_class("-active"):
             return
         self.add_class("-active")
@@ -86,6 +86,27 @@ class ChapterButton(ClickableLabel):
         self.chapter = chapter
         self.role: Role = role
         super().__init__(chapter.title, classes="chapter_btn")
+
+
+def fic_collapsible(fic: Fic, role: Role) -> Collapsible:
+    chapters: list[ClickableLabel] = [
+        ChapterButton(fic, ch, role) for ch in fic.chapters
+    ]
+    # TODO readonly: признак выключенного автором редактирования пока не найден
+    if can_manage(role, readonly=False):
+        chapters.append(
+            ClickableLabel(
+                "[bold]Новая глава ->[/]",
+                classes="new_chapter_btn",
+                markup=True,
+            )
+        )
+    return Collapsible(
+        *chapters,
+        # типизирует title как str, но принимает Content; str разбирается как разметка
+        title=Content(fic.title),  # pyright: ignore[reportArgumentType]
+        classes=f"{role}_fics_collapsible",
+    )
 
 
 class StartPageTab(TabPane):
@@ -113,55 +134,25 @@ class StartPageTab(TabPane):
     # воркер отменяется при удалении вкладки и до закрытия клиента в MainScreen.on_unmount
     @work(exclusive=True, group="start_page")
     async def load_start_page(self) -> None:
-        """Ник и списки фанфиков; все ошибки - в одном окне, без повторов."""
-        # dict, а не set: порядок строк как у запросов
-        errors: dict[str, None] = {}
+        """Ник и списки фанфиков; ошибка одного списка не прячет остальные."""
         try:
             # после входа ник уже есть, запроса не будет
             user = await self.api.get_user_info()
             self.query_one("#greeting", Label).update(Content(f"Привет, {user.name}!"))
-        except UserNotLoggedInError as e:
-            self.post_message(MainScreen.SessionExpired(str(e)))
-            return
         except FicbookAPIError as e:
-            log.warning("ник не загружен", exc_info=True)
-            errors[str(e)] = None
+            report_api_error(self, e, "Не удалось загрузить профиль")
+            if isinstance(e, STOP_LOADING):
+                return
         fics_container = self.query_one(".fics_container", VerticalScroll)
 
-        def gen_fic_collapsible(fic: Fic, role: Role) -> Collapsible:
-            chapters: list[ClickableLabel] = [
-                ChapterButton(fic, ch, role) for ch in fic.chapters
-            ]
-            # TODO readonly: признак выключенного автором редактирования пока не найден
-            if can_manage(role, readonly=False):
-                chapters.append(
-                    ClickableLabel(
-                        "[bold]Новая глава ->[/]",
-                        classes="new_chapter_btn",
-                        markup=True,
-                    )
-                )
-            return Collapsible(
-                *chapters,
-                # типизирует title как str, но принимает Content; str разбирается как разметка
-                title=Content(fic.title),  # pyright: ignore[reportArgumentType]
-                classes=f"{role}_fics_collapsible",
-            )
-
-        # ошибка одного списка не прячет остальные
         # цикл намеренный, пока не уверен как Cloudflare отнесётся к такой ораве запросов
         for role, label in FIC_SECTIONS:
             try:
                 fics = await self.api.get_fics(role)
-            except UserNotLoggedInError as e:
-                self.post_message(MainScreen.SessionExpired(str(e)))
-                return
             except FicbookAPIError as e:
-                log.warning("список %s не загружен", role, exc_info=True)
-                # без связи все списки падают одинаково: одна строка, а не по разделу
-                errors[str(e) if isinstance(e, NetworkError) else f"{label}: {e}"] = (
-                    None
-                )
+                report_api_error(self, e, f"Не удалось загрузить список «{label}»")
+                if isinstance(e, STOP_LOADING):
+                    return
                 continue
             if not fics:
                 continue
@@ -170,12 +161,9 @@ class StartPageTab(TabPane):
                 await fics_container.mount(Rule())
 
             await fics_container.mount(
-                Label(label, classes="fics_collapsibles_label"),
-                *[gen_fic_collapsible(fic, role) for fic in fics],
+                Label(f"{label}:", classes="fics_collapsibles_label"),
+                *[fic_collapsible(fic, role) for fic in fics],
             )
-
-        if errors:
-            self.app.push_screen(ErrorScreen("\n".join(errors)))
 
     @on(ClickableLabel.Pressed, ".chapter_btn")
     def on_chapter_pressed(self, event: ClickableLabel.Pressed) -> None:
@@ -192,13 +180,6 @@ class MainScreen(Screen):
         # priority: у TextArea ctrl+w удаляет слово (это остаётся на ctrl+backspace)
         Binding("ctrl+w", "close_chapter", "Закрыть главу", priority=True),
     ]
-
-    class SessionExpired(Message):
-        """Сессия истекла; обрабатывает App."""
-
-        def __init__(self, reason: str) -> None:
-            self.reason = reason
-            super().__init__()
 
     def __init__(self, api: FicbookAPI, storage: ChapterStorage | None = None) -> None:
         self.api = api
@@ -255,22 +236,8 @@ class MainScreen(Screen):
             self.fetching.add(tab_id)
             try:
                 site = await self.api.get_chapter(fic.id, chapter.id)
-            except UserNotLoggedInError as e:
-                self.post_message(MainScreen.SessionExpired(str(e)))
-                return
             except FicbookAPIError as e:
-                log.warning(
-                    "глава %s/%s не загружена", fic.id, chapter.id, exc_info=True
-                )
-                match e:
-                    case SiteError():
-                        self.notify(
-                            f"Сайт не отдал главу (код {e.status})", severity="error"
-                        )
-                    case NetworkError():
-                        self.notify("Глава недоступна офлайн", severity="warning")
-                    case _:
-                        self.app.push_screen(ErrorScreen(str(e)))
+                report_api_error(self, e, "Не удалось скачать главу")
                 return
             finally:
                 self.fetching.discard(tab_id)

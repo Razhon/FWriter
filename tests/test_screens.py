@@ -10,12 +10,14 @@ from fwriter.core.api.errors import (
     APIChangedError,
     LoginFailedError,
     NetworkError,
+    SiteError,
     UserNotLoggedInError,
 )
 from fwriter.core.api.models import Chapter, Fic, SlimChapterInfo, UserInfo
 from fwriter.core.storage import ChapterStorage
 from fwriter.run import FWriterApp, setup_logging
-from fwriter.screens import ErrorScreen, LoginScreen, MainScreen
+from fwriter.screens import ErrorScreen, LoginScreen, MainScreen, SessionExpired
+from fwriter.screens.api_errors import report_api_error
 from fwriter.screens.chapter import ChapterTab
 from fwriter.screens.main import FIC_SECTIONS
 from fwriter.secrets import SecretStorage
@@ -70,8 +72,8 @@ def test_failed_fic_list_keeps_others():
     api.user = UserInfo(1, "Кот")
 
     async def fake_get_fics(role: str) -> list[Fic]:
-        if role == "coauthor":
-            raise APIChangedError("сломалось")
+        if role in ("coauthor", "beta"):
+            raise APIChangedError(f"сломалось {role}")
         return [Fic("1", role, [])]
 
     api.get_fics = fake_get_fics
@@ -86,21 +88,26 @@ def test_failed_fic_list_keeps_others():
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
             titles = [str(c.title) for c in main.query(Collapsible)]
-            assert titles == ["author", "beta", "gamma"]
-            assert isinstance(pilot.app.screen, ErrorScreen)
-            log = pilot.app.screen.query_one(Log)
-            assert any("сломалось" in line for line in log.lines)
+            assert titles == ["author", "gamma"]
+            # обе ошибки - в одном окне
+            errors = [s for s in pilot.app.screen_stack if isinstance(s, ErrorScreen)]
+            assert len(errors) == 1
+            lines = errors[0].query_one(Log).lines
+            assert "сломалось coauthor" in lines
+            assert "сломалось beta" in lines
 
     asyncio.run(run())
 
 
 def test_offline_start_page_shows_one_error(caplog):
     api = FicbookAPI({})
+    fetched: list[str] = []
 
     async def no_user() -> UserInfo:
         raise NetworkError("Нет связи с сайтом")
 
     async def no_fics(role: str) -> list[Fic]:
+        fetched.append(role)
         raise NetworkError("Нет связи с сайтом")
 
     api.get_user_info = no_user
@@ -115,14 +122,17 @@ def test_offline_start_page_shows_one_error(caplog):
         async with TestApp().run_test() as pilot:
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
-            errors = [s for s in pilot.app.screen_stack if isinstance(s, ErrorScreen)]
-            assert len(errors) == 1
-            assert errors[0].query_one(Log).lines == ["Нет связи с сайтом"]
+            messages = [n.message for n in pilot.app._notifications]
+            assert messages == ["Не удалось загрузить профиль\nНет связи с сайтом"]
+            assert not isinstance(pilot.app.screen, ErrorScreen)
 
     asyncio.run(run())
+    # без связи остальные запросы не шлются
+    assert fetched == []
     # UI прячет подробности, в логе они должны остаться
-    assert all(r.exc_info for r in caplog.records if r.name == "fwriter.screens.main")
-    assert len(caplog.records) == 1 + len(FIC_SECTIONS)
+    records = [r for r in caplog.records if r.name == "fwriter.screens.api_errors"]
+    assert len(records) == 1
+    assert records[0].exc_info
 
 
 def test_setup_logging(tmp_path, monkeypatch):
@@ -373,7 +383,7 @@ def test_chapter_expired_session_opens_nothing(tmp_path):
     main = MainScreen(api, storage)
 
     class TestApp(MainScreenApp):
-        def on_main_screen_session_expired(self, message: MainScreen.SessionExpired):
+        def on_session_expired(self, message: SessionExpired):
             expired.append(message.reason)
 
     async def run():
@@ -556,7 +566,7 @@ def test_expired_session_keeps_unsaved_draft(tmp_path, monkeypatch):
             await type_in_chapter(pilot, main)
             with monkeypatch.context() as m:
                 m.setattr(ChapterStorage, "write_draft", broken_write_draft)
-                main.post_message(MainScreen.SessionExpired("истекла"))
+                main.post_message(SessionExpired("истекла"))
                 await pilot.pause()
             assert isinstance(app.screen, ErrorScreen)
             assert app.main_screen is main
@@ -586,11 +596,48 @@ def test_relogin_reports_lost_draft(tmp_path, monkeypatch):
             monkeypatch.setattr(
                 ChapterTab, "notify", lambda self, text, **kw: notes.append(text)
             )
-            main.post_message(MainScreen.SessionExpired("истекла"))
+            main.post_message(SessionExpired("истекла"))
             await pilot.pause()
             # диск так и не ожил: снятая вкладка не обещает повторить запись
             app.open_main(api)
             await pilot.pause()
         assert notes == ["Черновик главы не записан на диск, правки потеряны"]
+
+    asyncio.run(run())
+
+
+def test_report_api_error():
+    expired: list[str] = []
+
+    class TestApp(App):
+        def on_session_expired(self, message: SessionExpired):
+            expired.append(message.reason)
+
+    async def run():
+        async with TestApp().run_test() as pilot:
+            app = pilot.app
+            report_api_error(app.screen, NetworkError("Нет связи с сайтом"), "Не вышло")
+            report_api_error(app.screen, SiteError(503), "Не вышло")
+            await pilot.pause()
+            notes = [(n.message, n.severity) for n in app._notifications]
+            assert notes == [
+                ("Не вышло\nНет связи с сайтом", "warning"),
+                ("Не вышло\nСайт ответил ошибкой 503", "error"),
+            ]
+
+            report_api_error(app.screen, UserNotLoggedInError("Сессия истекла"), "-")
+            await pilot.pause()
+            assert expired == ["Сессия истекла"]
+            assert not isinstance(app.screen, ErrorScreen)
+
+            report_api_error(app.screen, APIChangedError("Нет блока"), "Не вышло")
+            await pilot.pause()
+            assert isinstance(app.screen, ErrorScreen)
+            # вторая такая же ошибка не открывает второе окно
+            report_api_error(app.screen, APIChangedError("Нет блока"), "Не вышло")
+            report_api_error(app.screen, APIChangedError("Нет другого"), "Не вышло")
+            await pilot.pause()
+            assert len(app.screen_stack) == 2
+            assert app.screen.lines == ["Не вышло\nНет блока", "Не вышло\nНет другого"]
 
     asyncio.run(run())

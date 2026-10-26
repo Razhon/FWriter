@@ -8,8 +8,17 @@ class ErrorScreen(ModalScreen):
     CSS_PATH = "../tcss/error.tcss"
 
     def __init__(self, data: str) -> None:
-        self.data = data
+        self.lines = [data]
         super().__init__()
+
+    def add(self, text: str) -> None:
+        """Ещё одна ошибка в открытое окно, без повторов."""
+        if text in self.lines:
+            return
+        self.lines.append(text)
+        # до on_mount Log ещё нет: строку выведет он
+        if self.is_mounted:
+            self.query_one(Log).write_line(text)
 
     def compose(self) -> ComposeResult:
         yield Vertical(
@@ -20,8 +29,7 @@ class ErrorScreen(ModalScreen):
         )
 
     def on_mount(self) -> None:
-        log = self.query_one(Log)
-        log.write_line(self.data)
+        self.query_one(Log).write_lines(self.lines)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "ok":

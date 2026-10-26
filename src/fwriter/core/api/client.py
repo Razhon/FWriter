@@ -23,10 +23,10 @@ def req[T](value: T | None, what: str) -> T:
 
 class FicbookAPI:
     BASE_URL = "https://ficbook.net"
-    # Только cookies сессии: полный экспорт из браузера не влезает в keyring на Windows
+    # только cookies сессии: полный экспорт из браузера не влезает в keyring на Windows
     AUTH_COOKIES = frozenset({"rme", "PHPSESSID", "cf_clearance"})
 
-    # Роль -> страница со списком. Ссылки на главы на всех страницах одинаковые.
+    # роль -> страница со списком. Ссылки на главы на всех страницах одинаковые.
     FIC_LISTS: ClassVar[dict[Role, str]] = {
         "author": "/home/myfics",
         # соавтор и сопереводчик на одной странице и оба coauthor, переводчик - author
@@ -62,7 +62,7 @@ class FicbookAPI:
             }
         except ValueError, KeyError, TypeError:
             return None
-        # TODO: Проверить какие именно ключи cookie необходимы
+        # TODO: проверить какие именно ключи cookie необходимы
         return cookies if len(cookies) >= 2 else None
 
     @classmethod
@@ -83,6 +83,8 @@ class FicbookAPI:
         try:
             response = await self._get("/")
             self.user = self._parse_user(response.text)
+        # shortcut: без связи тоже LoginFailedError, и run.py ведёт на вход, а не в
+        # офлайн по fic.json; пропускать NetworkError наверх вместе с офлайн-режимом
         except FicbookAPIError as e:
             raise LoginFailedError(str(e)) from e
 
@@ -212,8 +214,10 @@ class FicbookAPI:
         try:
             response = await self.client.request(method, url, **kwargs)
         except httpx.TimeoutException as e:
+            log.warning("%s %s: нет ответа вовремя", method, url)
             raise NetworkError("Сайт не ответил вовремя") from e
         except httpx.HTTPError as e:
+            log.warning("%s %s: нет связи", method, url)
             raise NetworkError("Нет связи с сайтом") from e
         # без заголовков и тела: там cookies и текст глав
         log.debug("%s %s -> %d", method, url, response.status_code)
@@ -224,6 +228,10 @@ class FicbookAPI:
     def _raise_for_status(response: httpx.Response) -> None:
         # как raise_for_status() у httpx: всё, кроме 2xx, включая 3xx
         if not response.is_success:
+            request = response.request
+            log.warning(
+                "%s %s -> %d", request.method, request.url.path, response.status_code
+            )
             raise SiteError(response.status_code)
 
     @staticmethod

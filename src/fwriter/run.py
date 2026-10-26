@@ -91,9 +91,7 @@ class FWriterApp(App):
     def on_login_screen_logged_in(self, message: LoginScreen.LoggedIn) -> None:
         self.open_main(message.api)
 
-    def on_main_screen_session_expired(
-        self, message: MainScreen.SessionExpired
-    ) -> None:
+    def on_session_expired(self, message: SessionExpired) -> None:
         """На LoginScreen; режим main удаляется, MainScreen закрывает клиент API."""
         if self.current_mode != "main":  # второй воркер уже переключил
             return
