@@ -89,6 +89,14 @@ class ClickableLabel(Widget, can_focus=True):
         self.post_message(ClickableLabel.Pressed(self))
 
 
+class ChapterButton(ClickableLabel):
+    def __init__(self, fic: Fic, chapter: SlimChapterInfo, role: Role) -> None:
+        self.fic = fic
+        self.chapter = chapter
+        self.role: Role = role
+        super().__init__(chapter.title, classes="chapter_btn")
+
+
 class StartPageTab(TabPane):
     class OpenChapter(Message):
         """Нажата глава; открывает MainScreen."""
@@ -101,7 +109,6 @@ class StartPageTab(TabPane):
 
     def __init__(self, api: FicbookAPI) -> None:
         self.api = api
-        self.chapter_btns: dict[ClickableLabel, tuple[Fic, SlimChapterInfo, Role]] = {}
         super().__init__("Начало работы", id="start_page")
 
     def compose(self) -> ComposeResult:
@@ -131,11 +138,9 @@ class StartPageTab(TabPane):
         fics_container = self.query_one(".fics_container", VerticalScroll)
 
         def gen_fic_collapsible(fic: Fic, role: Role) -> Collapsible:
-            chapters: list[ClickableLabel] = []
-            for ch in fic.chapters:
-                btn = ClickableLabel(ch.title, classes="chapter_btn")
-                self.chapter_btns[btn] = (fic, ch, role)
-                chapters.append(btn)
+            chapters: list[ClickableLabel] = [
+                ChapterButton(fic, ch, role) for ch in fic.chapters
+            ]
             # TODO readonly: признак выключенного автором редактирования пока не найден
             if can_manage(role, readonly=False):
                 chapters.append(
@@ -183,7 +188,9 @@ class StartPageTab(TabPane):
 
     @on(ClickableLabel.Pressed, ".chapter_btn")
     def on_chapter_pressed(self, event: ClickableLabel.Pressed) -> None:
-        self.post_message(StartPageTab.OpenChapter(*self.chapter_btns[event.clabel]))
+        btn = event.clabel
+        assert isinstance(btn, ChapterButton)  # Pressed типизирован базовым классом
+        self.post_message(StartPageTab.OpenChapter(btn.fic, btn.chapter, btn.role))
 
 
 class MainScreen(Screen):
