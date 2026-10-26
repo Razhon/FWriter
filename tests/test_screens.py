@@ -5,7 +5,11 @@ from textual.widgets import Collapsible, Input, Label, Log
 from textual.widgets._collapsible import CollapsibleTitle
 
 from fwriter.core.api.client import FicbookAPI
-from fwriter.core.api.errors import APIChangedError, LoginFailedError
+from fwriter.core.api.errors import (
+    APIChangedError,
+    LoginFailedError,
+    UserNotLoggedInError,
+)
 from fwriter.core.api.models import Fic, UserInfo
 from fwriter.run import FWriterApp
 from fwriter.screens import ErrorScreen, LoginScreen, MainScreen
@@ -125,5 +129,66 @@ def test_non_ascii_user_agent_is_rejected(monkeypatch):
             await pilot.pause()
             assert not called
             assert isinstance(pilot.app.screen, LoginScreen)
+
+    asyncio.run(run())
+
+
+def test_new_chapter_only_for_managers():
+    api = FicbookAPI({})
+    api.user = UserInfo(1, "Кот")
+
+    async def fake_get_fics(role: str) -> list[Fic]:
+        return [Fic("1", role, [])]
+
+    api.get_fics = fake_get_fics
+    main = MainScreen(api)
+
+    class TestApp(App):
+        def on_mount(self):
+            self.push_screen(main)
+
+    async def run():
+        async with TestApp().run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            with_button = [
+                str(c.title)
+                for c in main.query(Collapsible)
+                if c.query(".new_chapter_btn")
+            ]
+            assert with_button == ["author", "coauthor"]
+
+    asyncio.run(run())
+
+
+def test_expired_session_opens_login(monkeypatch):
+    monkeypatch.setattr(SecretStorage, "get_auth", lambda: ({"rme": "1"}, "ua"))
+    api = FicbookAPI({})
+    api.user = UserInfo(1, "Кот")
+
+    async def fake_login(cookies, user_agent):
+        return api
+
+    async def expired(role: str) -> list[Fic]:
+        raise UserNotLoggedInError("истекла")
+
+    async def no_fics(role: str) -> list[Fic]:
+        return []
+
+    monkeypatch.setattr(FicbookAPI, "login", fake_login)
+    api.get_fics = expired
+
+    async def run():
+        app = FWriterApp()
+        async with app.run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert isinstance(pilot.app.screen, ErrorScreen)
+            assert isinstance(pilot.app.screen_stack[-2], LoginScreen)
+            assert api.client.is_closed
+            # повторный вход ставит новый MainScreen
+            api.get_fics = no_fics
+            app.open_main(api)
+            await pilot.pause()
+            assert isinstance(pilot.app.screen, MainScreen)
 
     asyncio.run(run())

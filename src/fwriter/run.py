@@ -17,7 +17,6 @@ class FWriterApp(App):
 
     MODES: ClassVar[dict[str, str | Callable[[], Screen]]] = {
         "login": LoginScreen,
-        "main": "main_screen",
     }
 
     def on_mount(self) -> None:
@@ -46,8 +45,25 @@ class FWriterApp(App):
             self.switch_mode("login")
             self.push_screen(ErrorScreen(f"Не удалось войти: {e}"))
             return
-        self.install_screen(MainScreen(api), name="main_screen")
+        self.open_main(api)
+
+    def open_main(self, api: FicbookAPI) -> None:
+        # режим, а не install_screen: после повторного входа нужен новый MainScreen
+        self.add_mode("main", lambda: MainScreen(api))
         self.switch_mode("main")
+
+    def on_login_screen_logged_in(self, message: LoginScreen.LoggedIn) -> None:
+        self.open_main(message.api)
+
+    def on_main_screen_session_expired(
+        self, message: MainScreen.SessionExpired
+    ) -> None:
+        """На LoginScreen; режим main удаляется, MainScreen закрывает клиент API."""
+        if self.current_mode != "main":  # второй воркер уже переключил
+            return
+        self.switch_mode("login")
+        self.remove_mode("main")
+        self.push_screen(ErrorScreen(f"Войдите снова. {message.reason}"))
 
 
 def main():

@@ -14,8 +14,9 @@ from textual.widgets import Collapsible, Label, Rule, TabbedContent, TabPane
 
 from ..core.api import *
 from ..core.api.client import Role
-from ..core.api.errors import FicbookAPIError
+from ..core.api.errors import FicbookAPIError, UserNotLoggedInError
 from ..core.api.models import Fic
+from ..core.storage import can_manage
 from .error import ErrorScreen
 
 FIC_SECTIONS: list[tuple[Role, str]] = [
@@ -101,6 +102,9 @@ class StartPageTab(TabPane):
     async def load_user(self) -> None:
         try:
             user = await self.api.get_user_info()
+        except UserNotLoggedInError as e:
+            self.post_message(MainScreen.SessionExpired(str(e)))
+            return
         except (FicbookAPIError, httpx.HTTPError) as e:
             self.app.push_screen(ErrorScreen(f"{type(e).__name__}: {e}"))
             return
@@ -110,20 +114,24 @@ class StartPageTab(TabPane):
     async def load_fics(self) -> None:
         fics_container = self.query_one(".fics_container", VerticalScroll)
 
-        def gen_fic_collapsible(fic: Fic, classes: str) -> Collapsible:
+        def gen_fic_collapsible(fic: Fic, role: Role) -> Collapsible:
+            chapters = [
+                ClickableLabel(ch.title, classes="chapter_btn") for ch in fic.chapters
+            ]
+            # TODO readonly: признак выключенного автором редактирования пока не найден
+            if can_manage(role, readonly=False):
+                chapters.append(
+                    ClickableLabel(
+                        "[bold]Новая глава ->[/]",
+                        classes="new_chapter_btn",
+                        markup=True,
+                    )
+                )
             return Collapsible(
-                *[
-                    ClickableLabel(ch.title, classes="chapter_btn")
-                    for ch in fic.chapters
-                ],
-                ClickableLabel(  # TODO отключить для всех, кроме автора/соавтора с правами редактирования
-                    "[bold]Новая глава ->[/]",
-                    classes="new_chapter_btn",
-                    markup=True,
-                ),
+                *chapters,
                 # типизирует title как str, но принимает Content; str разбирается как разметка
                 title=Content(fic.title),  # pyright: ignore[reportArgumentType]
-                classes=classes,
+                classes=f"{role}_fics_collapsible",
             )
 
         # ошибка одного списка не прячет остальные
@@ -132,6 +140,9 @@ class StartPageTab(TabPane):
         for role, label in FIC_SECTIONS:
             try:
                 fics = await self.api.get_fics(role)
+            except UserNotLoggedInError as e:
+                self.post_message(MainScreen.SessionExpired(str(e)))
+                return
             except (FicbookAPIError, httpx.HTTPError) as e:
                 errors.append(f"{label} {type(e).__name__}: {e}")
                 continue
@@ -143,7 +154,7 @@ class StartPageTab(TabPane):
 
             await fics_container.mount(
                 Label(label, classes="fics_collapsibles_label"),
-                *[gen_fic_collapsible(fic, f"{role}_fics_collapsible") for fic in fics],
+                *[gen_fic_collapsible(fic, role) for fic in fics],
             )
 
         if errors:
@@ -152,6 +163,13 @@ class StartPageTab(TabPane):
 
 class MainScreen(Screen):
     CSS_PATH = "../tcss/main.tcss"
+
+    class SessionExpired(Message):
+        """Сессия истекла; обрабатывает App."""
+
+        def __init__(self, reason: str) -> None:
+            self.reason = reason
+            super().__init__()
 
     def __init__(self, api: FicbookAPI) -> None:
         self.api = api

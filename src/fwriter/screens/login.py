@@ -1,6 +1,7 @@
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Center
+from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Button, Input
 
@@ -8,17 +9,27 @@ from ..core.api import *
 from ..core.api.errors import LoginFailedError
 from ..secrets import SecretStorage
 from .error import ErrorScreen
-from .main import MainScreen
 
 
 class LoginScreen(Screen):
     CSS_PATH = "../tcss/login.tcss"
     ENABLE_COMMAND_PALETTE = False
 
+    class LoggedIn(Message):
+        """Вход удался; App открывает MainScreen."""
+
+        def __init__(self, api: FicbookAPI) -> None:
+            self.api = api
+            super().__init__()
+
     def compose(self) -> ComposeResult:
         yield Center(Input(placeholder="Кукисы", id="cookies", password=True))
         yield Center(Input(placeholder="User-Agent", id="user_agent"))
         yield Center(Button(label="Войти", id="login", disabled=True))
+
+    # после истёкшей сессии экран возвращается с выключенной кнопкой
+    def on_screen_resume(self):
+        self.update_login_button_state()
 
     @on(Input.Changed)
     def on_input(self):
@@ -78,5 +89,4 @@ class LoginScreen(Screen):
                 markup=False,
             )
 
-        self.app.install_screen(MainScreen(api), name="main_screen")
-        self.app.switch_mode("main")
+        self.post_message(LoginScreen.LoggedIn(api))

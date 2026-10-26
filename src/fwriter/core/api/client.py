@@ -36,6 +36,8 @@ class FicbookAPI:
 
     _USER_ID_RE = re.compile(r"/authors/(\d+)")
     _CHAPTER_RE = re.compile(r"/home/myfics/(\d+)/parts/(\d+)")
+    # div.profile-area есть в шапке любой страницы, пока сессия жива
+    _PROFILE_AREA_RE = re.compile(r'class="(?:[^"]*\s)?profile-area[\s"]')
 
     user: UserInfo | None = None
 
@@ -165,10 +167,24 @@ class FicbookAPI:
 
     async def _get(self, *args, **kwargs) -> httpx.Response:
         response = await self.client.get(*args, **kwargs)
+        self._raise_if_logged_out(response)
         response.raise_for_status()
+        # GET защищённой страницы без сессии отвечает 200, но без блока профиля
+        if not self._PROFILE_AREA_RE.search(response.text):
+            raise UserNotLoggedInError("Сессия истекла: на странице нет блока профиля")
         return response
 
     async def _post(self, *args, **kwargs) -> httpx.Response:
         response = await self.client.post(*args, **kwargs)
-        response.raise_for_status()
+        self._raise_if_logged_out(response)
+        if not response.is_redirect:  # откат версии отвечает 302 на главу
+            response.raise_for_status()
         return response
+
+    @staticmethod
+    def _raise_if_logged_out(response: httpx.Response) -> None:
+        if (
+            response.is_redirect
+            and httpx.URL(response.headers["location"]).path == "/login"
+        ):
+            raise UserNotLoggedInError("Сессия истекла: сайт перенаправил на /login")

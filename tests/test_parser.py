@@ -6,7 +6,11 @@ import httpx
 import pytest
 
 from fwriter.core.api.client import FicbookAPI, Role
-from fwriter.core.api.errors import APIChangedError, LoginFailedError
+from fwriter.core.api.errors import (
+    APIChangedError,
+    LoginFailedError,
+    UserNotLoggedInError,
+)
 from fwriter.core.api.models import UserInfo
 
 BETA_PAGE = (
@@ -14,16 +18,22 @@ BETA_PAGE = (
 ).read_text(encoding="utf-8")
 
 
-def parse(html: str, role: Role = "beta"):
+def mock_api(handler) -> FicbookAPI:
     api = FicbookAPI({})
+    api.client = httpx.AsyncClient(
+        base_url=FicbookAPI.BASE_URL, transport=httpx.MockTransport(handler)
+    )
+    return api
+
+
+def parse(html: str, role: Role = "beta"):
     requested: list[str] = []
 
-    async def fake_get(path: str) -> httpx.Response:
-        requested.append(path)
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
         return httpx.Response(200, text=html)
 
-    api._get = fake_get
-    fics = asyncio.run(api.get_fics(role))
+    fics = asyncio.run(mock_api(handler).get_fics(role))
     assert requested == [FicbookAPI.FIC_LISTS[role]]
     return fics
 
@@ -118,3 +128,25 @@ def test_login(monkeypatch, response: httpx.Response, ok: bool):
         with pytest.raises(LoginFailedError):
             asyncio.run(login)
         assert closed
+
+
+def test_expired_session_get_raises():
+    logged_out = BETA_PAGE.replace("profile-area", "login-area")
+
+    with pytest.raises(UserNotLoggedInError):
+        parse(logged_out)
+
+
+@pytest.mark.parametrize(
+    ("location", "logged_out"),
+    [("https://ficbook.net/login", True), ("/home/myfics/1/parts/2", False)],
+)
+def test_post_redirect(location: str, logged_out: bool):
+    api = mock_api(lambda _: httpx.Response(302, headers={"location": location}))
+    post = api._post("/home/versions/revert_part_version")
+
+    if logged_out:
+        with pytest.raises(UserNotLoggedInError):
+            asyncio.run(post)
+    else:  # откат отвечает 302 на главу
+        assert asyncio.run(post).status_code == 302
