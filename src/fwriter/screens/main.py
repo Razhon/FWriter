@@ -9,7 +9,6 @@ from textual.containers import Center, VerticalScroll
 from textual.content import Content
 from textual.message import Message
 from textual.screen import Screen
-from textual.widget import Widget
 from textual.widgets import Collapsible, Label, Rule, TabbedContent, TabPane, Tabs
 
 from ..core.api.client import FicbookAPI
@@ -34,14 +33,11 @@ FIC_SECTIONS: list[tuple[Role, str]] = [
 ]
 
 
-class ClickableLabel(Widget, can_focus=True):
+class ClickableLabel(Label, can_focus=True):
     """Намеренный отдельный класс от Button, так легче"""
 
     DEFAULT_CSS = """
     ClickableLabel {
-        width: auto;
-        height: auto;
-        min-height: 1;
         pointer: pointer;
         &:focus, &:hover {
             text-style: underline;
@@ -65,16 +61,11 @@ class ClickableLabel(Widget, can_focus=True):
         def control(self) -> ClickableLabel:
             return self.clabel
 
+    # markup выключен по умолчанию, в отличие от Label: названия глав приходят с сайта
     def __init__(
-        self, input_label: str, classes: str | None = None, markup: bool = False
+        self, label: str, classes: str | None = None, markup: bool = False
     ) -> None:
-        self.input_label = input_label
-        super().__init__(classes=classes, markup=markup)
-
-    def compose(self) -> ComposeResult:
-        yield Label(
-            self.input_label, classes="clickable_label", markup=self._render_markup
-        )
+        super().__init__(label, classes=classes, markup=markup)
 
     async def _on_click(self, event: events.Click) -> None:
         event.stop()

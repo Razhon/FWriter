@@ -25,13 +25,18 @@ Label {
     margin: 1 1 1 1;
 }
 
-.chapter_btn {
-    height: 2;
-    margin: 0;
+CollapsibleTitle, ClickableLabel {
+    width: 1fr;
 }
 
-CollapsibleTitle, ClickableLabel, .clickable_label {
-    width: 1fr;
+/* отступы - padding, а не margin, как у Label: по ним тоже можно кликнуть */
+ClickableLabel {
+    margin: 0;
+    padding: 1 1 0 1;
+}
+
+.new_chapter_btn {
+    padding: 1;
 }
 
 Collapsible {
