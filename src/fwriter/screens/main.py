@@ -90,9 +90,17 @@ class ClickableLabel(Widget, can_focus=True):
 
 
 class StartPageTab(TabPane):
-    def __init__(self, api: FicbookAPI, storage: ChapterStorage) -> None:
+    class OpenChapter(Message):
+        """Нажата глава; открывает MainScreen."""
+
+        def __init__(self, fic: Fic, chapter: SlimChapterInfo, role: Role) -> None:
+            self.fic = fic
+            self.chapter = chapter
+            self.role = role
+            super().__init__()
+
+    def __init__(self, api: FicbookAPI) -> None:
         self.api = api
-        self.storage = storage
         self.chapter_btns: dict[ClickableLabel, tuple[Fic, SlimChapterInfo, Role]] = {}
         super().__init__("Начало работы", id="start_page")
 
@@ -175,15 +183,52 @@ class StartPageTab(TabPane):
 
     @on(ClickableLabel.Pressed, ".chapter_btn")
     def on_chapter_pressed(self, event: ClickableLabel.Pressed) -> None:
-        self.open_chapter(*self.chapter_btns[event.clabel])
+        self.post_message(StartPageTab.OpenChapter(*self.chapter_btns[event.clabel]))
 
+
+class MainScreen(Screen):
+    CSS_PATH = "../tcss/main.tcss"
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("f1", "start_page", "Начало работы"),
+        # priority: у TextArea ctrl+w удаляет слово (это остаётся на ctrl+backspace)
+        Binding("ctrl+w", "close_chapter", "Закрыть главу", priority=True),
+    ]
+
+    class SessionExpired(Message):
+        """Сессия истекла; обрабатывает App."""
+
+        def __init__(self, reason: str) -> None:
+            self.reason = reason
+            super().__init__()
+
+    def __init__(self, api: FicbookAPI, storage: ChapterStorage | None = None) -> None:
+        self.api = api
+        self.storage = storage or ChapterStorage(DATA_DIR)
+        super().__init__()
+
+    def compose(self) -> ComposeResult:
+        with TabbedContent():
+            yield StartPageTab(self.api)
+
+    # стартовая вкладка не закрывается, она же выбор глав
+    def action_start_page(self) -> None:
+        tabbed = self.query_one(TabbedContent)
+        tabbed.active = "start_page"
+        # фокус из скрытой вкладки главы вернул бы её обратно
+        tabbed.query_one(Tabs).focus()
+
+    def on_start_page_tab_open_chapter(self, message: StartPageTab.OpenChapter) -> None:
+        self.open_chapter(message.fic, message.chapter, message.role)
+
+    # на экране, а не на вкладке: воркер живёт, пока открыты вкладки глав
     # не exclusive: клик по другой главе не должен отменять открытие первой
     @work(group="open_chapter")
     async def open_chapter(
         self, fic: Fic, chapter: SlimChapterInfo, role: Role
     ) -> None:
         """Вкладка с локальным черновиком; если его нет - с текстом с сайта."""
-        tabbed = self.screen.query_one(TabbedContent)
+        tabbed = self.query_one(TabbedContent)
         tab_id = ChapterTab.tab_id(fic.id, chapter.id)
 
         def show() -> None:
@@ -275,39 +320,6 @@ class StartPageTab(TabPane):
             )
         )
         show()
-
-
-class MainScreen(Screen):
-    CSS_PATH = "../tcss/main.tcss"
-
-    BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("f1", "start_page", "Начало работы"),
-        # priority: у TextArea ctrl+w удаляет слово (это остаётся на ctrl+backspace)
-        Binding("ctrl+w", "close_chapter", "Закрыть главу", priority=True),
-    ]
-
-    class SessionExpired(Message):
-        """Сессия истекла; обрабатывает App."""
-
-        def __init__(self, reason: str) -> None:
-            self.reason = reason
-            super().__init__()
-
-    def __init__(self, api: FicbookAPI, storage: ChapterStorage | None = None) -> None:
-        self.api = api
-        self.storage = storage or ChapterStorage(DATA_DIR)
-        super().__init__()
-
-    def compose(self) -> ComposeResult:
-        with TabbedContent():
-            yield StartPageTab(self.api, self.storage)
-
-    # стартовая вкладка не закрывается, она же выбор глав
-    def action_start_page(self) -> None:
-        tabbed = self.query_one(TabbedContent)
-        tabbed.active = "start_page"
-        # фокус из скрытой вкладки главы вернул бы её обратно
-        tabbed.query_one(Tabs).focus()
 
     def save_all(self, notify: bool = True) -> bool:
         """Черновики всех вкладок; False, если хоть один не записан."""

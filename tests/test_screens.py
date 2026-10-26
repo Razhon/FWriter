@@ -17,7 +17,7 @@ from fwriter.core.storage import ChapterStorage
 from fwriter.run import FWriterApp, setup_logging
 from fwriter.screens import ErrorScreen, LoginScreen, MainScreen
 from fwriter.screens.chapter import ChapterTab
-from fwriter.screens.main import FIC_SECTIONS, StartPageTab
+from fwriter.screens.main import FIC_SECTIONS
 from fwriter.secrets import SecretStorage
 
 
@@ -279,7 +279,7 @@ class MainScreenApp(App):
 
 async def open_chapter(pilot, main: MainScreen) -> None:
     """Открывает главу FIC, как клик по ней, и ждёт воркер."""
-    main.query_one(StartPageTab).open_chapter(FIC, FIC.chapters[0], "author")
+    main.open_chapter(FIC, FIC.chapters[0], "author")
     await pilot.app.workers.wait_for_complete()
     await pilot.pause()
 
@@ -322,7 +322,7 @@ def test_chapter_tab_saves_draft(tmp_path, monkeypatch):
             async def open_and_type(keys: str) -> ChapterTab:
                 # мышью: фокус на нажатой главе не должен возвращать стартовую вкладку
                 await pilot.click(".chapter_btn")
-                # Pressed должен дойти до StartPageTab и запустить воркер
+                # Pressed должен дойти до MainScreen через OpenChapter и запустить воркер
                 await pilot.pause()
                 await pilot.app.workers.wait_for_complete()
                 await pilot.pause(0.3)  # подсветка нажатия
@@ -403,9 +403,8 @@ def test_late_site_response_keeps_closed_draft(tmp_path):
         async with MainScreenApp(main).run_test() as pilot:
             await pilot.app.workers.wait_for_complete()
             first, second = responses
-            start = main.query_one(StartPageTab)
-            start.open_chapter(FIC, FIC.chapters[0], "author")
-            start.open_chapter(FIC, FIC.chapters[0], "author")
+            main.open_chapter(FIC, FIC.chapters[0], "author")
+            main.open_chapter(FIC, FIC.chapters[0], "author")
             await pilot.pause()
 
             # первый ответ открывает вкладку, её правят и закрывают
