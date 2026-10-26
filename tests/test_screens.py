@@ -387,12 +387,14 @@ def test_chapter_expired_session_opens_nothing(tmp_path):
     asyncio.run(run())
 
 
-def test_late_site_response_keeps_closed_draft(tmp_path):
+def test_click_while_loading_sends_one_request(tmp_path):
     api = api_without_fics()
-    responses = [asyncio.Event(), asyncio.Event()]
+    response = asyncio.Event()
+    fetched: list[str] = []
 
     async def fake_get_chapter(fic_id: str, chapter_id: str) -> Chapter:
-        await responses.pop(0).wait()
+        fetched.append(chapter_id)
+        await response.wait()
         return Chapter("Глава", "Текст.", title_editable=True, status=1)
 
     api.get_chapter = fake_get_chapter
@@ -402,27 +404,25 @@ def test_late_site_response_keeps_closed_draft(tmp_path):
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
             await pilot.app.workers.wait_for_complete()
-            first, second = responses
-            main.open_chapter(FIC, FIC.chapters[0], "author")
             main.open_chapter(FIC, FIC.chapters[0], "author")
             await pilot.pause()
+            main.open_chapter(FIC, FIC.chapters[0], "author")
+            await pilot.pause()
+            messages = [n.message for n in pilot.app._notifications]
+            assert "Глава загружается…" in messages
 
-            # первый ответ открывает вкладку, её правят и закрывают
-            first.set()
-            await pilot.pause()
-            await pilot.pause()
-            tab = main.query_one(ChapterTab)
-            tab.editor.move_cursor(tab.editor.document.end)
-            await pilot.press("!", "ctrl+w")
-            await pilot.pause()
-            assert not main.query(ChapterTab)
-
-            # второй ответ приходит поздно и не затирает правки
-            second.set()
+            response.set()
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
-            assert not main.query(ChapterTab)
-        assert storage.read_draft("00000000", "00000000") == "Текст.!"
+            assert len(main.query(ChapterTab)) == 1
+            assert not main.fetching
+
+            # после закрытия глава открывается с диска, без второго запроса
+            await pilot.press("!", "ctrl+w")
+            await pilot.pause()
+            await open_chapter(pilot, main)
+            assert main.query_one(ChapterTab).editor.text == "!Текст."
+        assert fetched == ["00000000"]
 
     asyncio.run(run())
 

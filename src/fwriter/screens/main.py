@@ -1,6 +1,6 @@
 import logging
 from functools import partial
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 from textual import events, on, work
 from textual.app import ComposeResult
@@ -203,6 +203,8 @@ class MainScreen(Screen):
     def __init__(self, api: FicbookAPI, storage: ChapterStorage | None = None) -> None:
         self.api = api
         self.storage = storage or ChapterStorage(DATA_DIR)
+        # tab_id глав, которые сейчас скачиваются: повторный клик не шлёт второй GET
+        self.fetching: set[str] = set()
         super().__init__()
 
     def compose(self) -> ComposeResult:
@@ -234,27 +236,23 @@ class MainScreen(Screen):
             # фокус с нажатой главы на скрытой стартовой вкладке вернул бы её обратно
             tabbed.query_one(f"#{tab_id}", ChapterTab).editor.focus()
 
-        def read_draft() -> str | None | Literal[False]:
-            """False: черновик есть, но не читается; уведомление уже показано."""
-            try:
-                return self.storage.read_draft(fic.id, chapter.id)
-            except OSError, ValueError:  # ValueError: не UTF-8
-                log.warning(
-                    "черновик %s/%s не прочитан", fic.id, chapter.id, exc_info=True
-                )
-                self.notify(
-                    "Не удалось прочитать черновик главы с диска", severity="error"
-                )
-                return False
-
         if tabbed.query(f"#{tab_id}"):
             show()
             return
-        text = read_draft()
-        if text is False:
+        if tab_id in self.fetching:
+            self.notify("Глава загружается…")
+            return
+        try:
+            text = self.storage.read_draft(fic.id, chapter.id)
+        except OSError, ValueError:  # ValueError: не UTF-8
+            log.warning("черновик %s/%s не прочитан", fic.id, chapter.id, exc_info=True)
+            self.notify("Не удалось прочитать черновик главы с диска", severity="error")
             return
         title = chapter.title
         if text is None:
+            # от проверки fetching до add синхронно, так что пока идёт запрос,
+            # эту главу никто не откроет и черновик для неё не появится
+            self.fetching.add(tab_id)
             try:
                 site = await self.api.get_chapter(fic.id, chapter.id)
             except UserNotLoggedInError as e:
@@ -274,13 +272,8 @@ class MainScreen(Screen):
                     case _:
                         self.app.push_screen(ErrorScreen(str(e)))
                 return
-            # пока шёл запрос, главу могли открыть повторным кликом и уже править
-            if tabbed.query(f"#{tab_id}"):
-                show()
-                return
-            # ...или открыть, поправить и закрыть: черновик на диске новее ответа
-            if read_draft() is not None:
-                return
+            finally:
+                self.fetching.discard(tab_id)
             text, title = site.content, site.title
             try:
                 self.storage.write_draft(fic.id, chapter.id, text)
