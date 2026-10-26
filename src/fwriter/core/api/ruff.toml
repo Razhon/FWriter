@@ -1,0 +1,5 @@
+extend = "../ruff.toml"
+
+[lint.flake8-tidy-imports.banned-api]
+"textual".msg = "core/ не знает об UI"
+"fwriter.screens".msg = "core/ не знает об UI"

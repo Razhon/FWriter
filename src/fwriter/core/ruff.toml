@@ -1,0 +1,17 @@
+# Вложенный конфиг заменяет banned-api корневого, а не дополняет его
+extend = "../../../ruff.toml"
+
+[lint]
+extend-select = ["TID251", "TID252"]
+
+# shortcut: относительные импорты banned-api не видит (from .api import FicbookAPI пройдёт),
+# поэтому ловится только абсолютный импорт; "parents" хотя бы заставляет писать screens абсолютно
+[lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+[lint.flake8-tidy-imports.banned-api]
+"textual".msg = "core/ не знает об UI"
+"fwriter.screens".msg = "core/ не знает об UI"
+"httpx".msg = "Сеть только в core/api; storage.py и merge.py работают без неё"
+"fwriter.core.api.FicbookAPI".msg = "storage.py и merge.py не знают о сети"
+"fwriter.core.api.client.FicbookAPI".msg = "storage.py и merge.py не знают о сети"

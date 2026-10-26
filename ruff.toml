@@ -1,4 +1,10 @@
 target-version = "py314"
+# пути от этого файла: вложенные ruff.toml иначе не узнают fwriter как first-party
+src = [".", "src"]
 
 [format]
 docstring-code-format = true
+
+[lint]
+# banned-api задаётся во вложенных ruff.toml: src/fwriter/core, src/fwriter/core/api, tests
+extend-select = ["TID251"]
