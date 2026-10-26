@@ -1,4 +1,14 @@
 from dataclasses import dataclass
+from typing import Literal
+
+Role = Literal["author", "coauthor", "beta", "gamma"]
+
+CAN_MANAGE: frozenset[Role] = frozenset({"author", "coauthor"})
+
+
+def can_manage(role: Role, readonly: bool) -> bool:
+    """Название главы и "Новая глава"; текст и отправка - при not readonly."""
+    return role in CAN_MANAGE and not readonly
 
 
 @dataclass(frozen=True)

@@ -1,3 +1,5 @@
+import logging
+
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Center
@@ -5,10 +7,12 @@ from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Button, Input
 
-from ..core.api import *
+from ..core.api.client import FicbookAPI
 from ..core.api.errors import LoginFailedError
 from ..secrets import SecretStorage
 from .error import ErrorScreen
+
+log = logging.getLogger(__name__)
 
 
 class LoginScreen(Screen):
@@ -75,18 +79,19 @@ class LoginScreen(Screen):
         try:
             api = await FicbookAPI.login(cookies, user_agent)
         except LoginFailedError as e:
+            log.warning("вход не удался", exc_info=True)
             event.button.disabled = False
             self.app.push_screen(ErrorScreen(str(e)))
             return
 
         try:
             SecretStorage.set_auth(cookies, user_agent)
-        except Exception as e:  # noqa: BLE001 — pywintypes.error на Windows, у других бэкендов свои типы
+        except Exception:  # pywintypes.error на Windows, у других бэкендов свои типы
+            log.warning("вход не сохранён", exc_info=True)
             self.notify(
-                f"Не удалось сохранить вход: {e}. В следующий раз придётся войти снова.",
+                "Не удалось сохранить вход: в следующий раз придётся войти снова",
                 severity="warning",
                 timeout=6,
-                markup=False,
             )
 
         self.post_message(LoginScreen.LoggedIn(api))

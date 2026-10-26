@@ -7,13 +7,15 @@ from typing import Any
 import httpx
 import pytest
 
-from fwriter.core.api.client import FicbookAPI, Role
+from fwriter.core.api.client import FicbookAPI
 from fwriter.core.api.errors import (
     APIChangedError,
     LoginFailedError,
+    NetworkError,
+    SiteError,
     UserNotLoggedInError,
 )
-from fwriter.core.api.models import Chapter, UserInfo
+from fwriter.core.api.models import Chapter, Role, UserInfo
 
 FIXTURES = Path(__file__).parent / "fixtures"
 BETA_PAGE = (FIXTURES / "assistant_fanfics-beta.html").read_text(encoding="utf-8")
@@ -56,7 +58,12 @@ def test_beta_page():
     ]
     assert fics[0].title == "Фанфик 1"
     assert fics[1].chapters[0].id == "2002"
-    assert fics[1].chapters[0].title == "Глава 1. Название 1"
+    # счётчик "Ждут: +N" вложен в заголовок главы и в название не входит
+    assert [ch.title for ch in fics[1].chapters[:3]] == [
+        "Глава 1. Название 1",
+        "Глава 2. Название 2",
+        "Глава 3. Название 3",
+    ]
 
 
 def test_changed_layout_raises():
@@ -118,7 +125,7 @@ def test_login(monkeypatch, response: httpx.Response, ok: bool):
     async def fake_get(self, path: str) -> httpx.Response:
         assert path == "/"
         if response.status_code != 200:
-            response.raise_for_status()
+            raise SiteError(response.status_code)
         return response
 
     async def fake_close(self) -> None:
@@ -150,7 +157,7 @@ def test_expired_session_get_raises():
     [
         ({"location": "https://ficbook.net/login"}, UserNotLoggedInError),
         ({"location": "/home/myfics/1/parts/2"}, None),  # откат отвечает 302 на главу
-        ({}, httpx.HTTPStatusError),  # 3xx без Location
+        ({}, SiteError),  # 3xx без Location
     ],
 )
 def test_post_redirect(headers: dict[str, str], error: type[Exception] | None):
@@ -162,6 +169,28 @@ def test_post_redirect(headers: dict[str, str], error: type[Exception] | None):
             asyncio.run(post)
     else:
         assert asyncio.run(post).status_code == 302
+
+
+def raise_(error: Exception):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise error
+
+    return handler
+
+
+@pytest.mark.parametrize(
+    ("handler", "text"),
+    [
+        (raise_(httpx.ConnectError("getaddrinfo failed")), "Нет связи с сайтом"),
+        (raise_(httpx.ReadTimeout("")), "Сайт не ответил вовремя"),
+        (lambda _: httpx.Response(503), "Сайт ответил ошибкой 503"),
+    ],
+)
+def test_http_errors_become_api_errors(handler, text: str):
+    # UI показывает str(e), поэтому текст для человека, а не сообщение httpx
+    with pytest.raises((NetworkError, SiteError)) as e:
+        asyncio.run(mock_api(handler)._get("/"))
+    assert str(e.value) == text
 
 
 def get_chapter(html: str) -> Chapter:

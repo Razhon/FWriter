@@ -1,18 +1,19 @@
 import json
+import logging
 import re
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 import httpx
 from bs4 import BeautifulSoup
 
 from .errors import *
-from .models import Chapter, Fic, SlimChapterInfo, UserInfo
+from .models import Chapter, Fic, Role, SlimChapterInfo, UserInfo
 
-Role = Literal["author", "coauthor", "beta", "gamma"]
+log = logging.getLogger(__name__)
 
 
 def req[T](value: T | None, what: str) -> T:
-    """Требует, чтобы value было не None/не пустым, иначе — APIChangedError."""
+    """Требует, чтобы value было не None/не пустым, иначе - APIChangedError."""
     if not value:
         raise APIChangedError(
             f"Не найдено на странице: {what}. Похоже, ficbook изменил разметку."
@@ -28,7 +29,7 @@ class FicbookAPI:
     # Роль -> страница со списком. Ссылки на главы на всех страницах одинаковые.
     FIC_LISTS: ClassVar[dict[Role, str]] = {
         "author": "/home/myfics",
-        # TODO: соавтор и сопереводчик на одной странице, переводчик в myfics, разделить роли, не на чем проверить
+        # соавтор и сопереводчик на одной странице и оба coauthor, переводчик - author
         "coauthor": "/home/assistant_fanfics/coauthor",
         "beta": "/home/assistant_fanfics/beta",
         "gamma": "/home/assistant_fanfics/gamma",
@@ -82,9 +83,8 @@ class FicbookAPI:
         try:
             response = await self._get("/")
             self.user = self._parse_user(response.text)
-        except (httpx.HTTPError, FicbookAPIError) as e:
-            # str() у таймаутов httpx пустой
-            raise LoginFailedError(f"{type(e).__name__}: {e}") from e
+        except FicbookAPIError as e:
+            raise LoginFailedError(str(e)) from e
 
     async def close(self) -> None:
         await self.client.aclose()
@@ -152,8 +152,12 @@ class FicbookAPI:
                         ch_link.find("span"), f"название главы {chapter_id}"
                     )
 
+                    # только свой текст: внутри вложен счётчик "Ждут: +N"
+                    own_text = chapter_title_unparsed.find_all(
+                        string=True, recursive=False
+                    )
                     chapter_title = req(
-                        " ".join(chapter_title_unparsed.get_text().split()),
+                        " ".join("".join(own_text).split()),
                         f"текст названия главы {chapter_id}",
                     )
 
@@ -170,7 +174,7 @@ class FicbookAPI:
         form = req(soup.find("form", id="savePartForm"), "форма главы (savePartForm)")
         editor = req(form.find("fanfic-editor"), "редактор главы (fanfic-editor)")
         content = editor.get("initial-value")
-        if content is None:  # пустой текст допустим, отсутствие атрибута — нет
+        if content is None:  # пустой текст допустим, отсутствие атрибута - нет
             raise APIChangedError("Не найдено на странице: текст главы (initial-value)")
         title_input = req(form.find("input", attrs={"name": "title"}), "поле названия")
         # кнопок статуса нет у беты; если они есть, одна обязана быть отмечена
@@ -189,21 +193,38 @@ class FicbookAPI:
             status=int(status) if status is not None else None,
         )
 
-    async def _get(self, *args, **kwargs) -> httpx.Response:
-        response = await self.client.get(*args, **kwargs)
-        self._raise_if_logged_out(response)
-        response.raise_for_status()
+    async def _get(self, url: str) -> httpx.Response:
+        response = await self._send("GET", url)
+        self._raise_for_status(response)
         # GET защищённой страницы без сессии отвечает 200, но без блока профиля
         if not self._PROFILE_AREA_RE.search(response.text):
             raise UserNotLoggedInError("Сессия истекла: на странице нет блока профиля")
         return response
 
-    async def _post(self, *args, **kwargs) -> httpx.Response:
-        response = await self.client.post(*args, **kwargs)
-        self._raise_if_logged_out(response)
+    async def _post(self, url: str, **kwargs) -> httpx.Response:
+        response = await self._send("POST", url, **kwargs)
         if not response.has_redirect_location:  # откат версии отвечает 302 на главу
-            response.raise_for_status()
+            self._raise_for_status(response)
         return response
+
+    async def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Ошибки httpx -> наши, с текстом для человека; UI про httpx не знает."""
+        try:
+            response = await self.client.request(method, url, **kwargs)
+        except httpx.TimeoutException as e:
+            raise NetworkError("Сайт не ответил вовремя") from e
+        except httpx.HTTPError as e:
+            raise NetworkError("Нет связи с сайтом") from e
+        # без заголовков и тела: там cookies и текст глав
+        log.debug("%s %s -> %d", method, url, response.status_code)
+        self._raise_if_logged_out(response)
+        return response
+
+    @staticmethod
+    def _raise_for_status(response: httpx.Response) -> None:
+        # как raise_for_status() у httpx: всё, кроме 2xx, включая 3xx
+        if not response.is_success:
+            raise SiteError(response.status_code)
 
     @staticmethod
     def _raise_if_logged_out(response: httpx.Response) -> None:

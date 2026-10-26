@@ -1,6 +1,6 @@
 extend = "../ruff.toml"
 
 [lint.flake8-tidy-imports.banned-api]
-"pytest_asyncio".msg = "Асинхронные тесты — через asyncio.run, без pytest-asyncio"
-"pytest.mark.asyncio".msg = "Асинхронные тесты — через asyncio.run, без pytest-asyncio"
+"pytest_asyncio".msg = "Асинхронные тесты - через asyncio.run, без pytest-asyncio"
+"pytest.mark.asyncio".msg = "Асинхронные тесты - через asyncio.run, без pytest-asyncio"
 "fwriter.core.storage.DATA_DIR".msg = "Тесты ChapterStorage работают на tmp_path"

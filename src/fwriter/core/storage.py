@@ -1,24 +1,18 @@
 import json
 import os
-from dataclasses import asdict, dataclass, field
+import sys
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
+from io import TextIOWrapper
 from pathlib import Path
 from typing import Literal, get_args
 
 from platformdirs import user_data_dir
 
-from .api.client import Role
-from .api.models import Fic, SlimChapterInfo
+from .api.models import Fic, Role, SlimChapterInfo
 
 # appauthor=False: без лишней вложенной папки fwriter/fwriter в Windows
 DATA_DIR = Path(user_data_dir("fwriter", appauthor=False))
-
-CAN_MANAGE = frozenset({"author", "coauthor"})
-
-
-def can_manage(role: str, readonly: bool) -> bool:
-    """Название главы и «Новая глава»; текст и отправка — при not readonly."""
-    return role in CAN_MANAGE and not readonly
 
 
 type Source = Literal["manual", "site", "publish"]
@@ -26,7 +20,7 @@ type Source = Literal["manual", "site", "publish"]
 
 @dataclass
 class Version:
-    """Запись о снимке в chapter.json; site_* и author — только у ревизий сайта."""
+    """Запись о снимке в chapter.json; site_* и author - только у ревизий сайта."""
 
     file: str
     title: str
@@ -59,10 +53,44 @@ def _write(path: Path, text: str) -> None:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+    # без fsync папки Linux может потерять rename при отключении питания
+    # и нарушить порядок записей (версия до chapter.json); в Windows так нельзя
+    if sys.platform != "win32":
+        try:
+            fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            # файл уже на месте; часть сетевых и FUSE-систем не даёт открыть
+            # папку или сделать ей fsync
+            pass
 
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8", newline="")
+
+
+def lock_data_dir(root: Path) -> TextIOWrapper:
+    """Блокировка от второй копии, пока файл открыт; OSError, если занято."""
+    # не данные, поэтому мимо _write(); не удаляем, иначе третья копия тоже возьмёт
+    root.mkdir(parents=True, exist_ok=True)
+    f = (root / "fwriter.lock").open("a")  # не "w": не обрезать занятый файл
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            f.seek(0)  # locking блокирует с текущей позиции
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        raise
+    return f
 
 
 def _dump(data: object) -> str:
@@ -70,9 +98,9 @@ def _dump(data: object) -> str:
 
 
 class ChapterStorage:
-    """Черновики, версии и meta.json на диске; о сети и UI ничего не знает.
+    """Черновики, версии и fic.json на диске; о сети и UI ничего не знает.
 
-    Повреждённые meta.json и chapter.json дают ValueError, отсутствующие -
+    Повреждённые fic.json и chapter.json дают ValueError, отсутствующие -
     FileNotFoundError; тексты черновика и версий читаются независимо от них.
     """
 
@@ -84,7 +112,7 @@ class ChapterStorage:
 
     def write_fic(self, fic: Fic, role: Role, readonly: bool) -> None:
         _write(
-            self.fics / fic.id / "meta.json",
+            self.fics / fic.id / "fic.json",
             _dump(
                 {
                     "title": fic.title,
@@ -96,27 +124,32 @@ class ChapterStorage:
         )
 
     def read_fics(self) -> tuple[list[tuple[Fic, Role, bool]], list[str]]:
-        """Фанфики из meta.json для офлайн-режима: [(фанфик, роль, readonly)] и ошибки.
+        """Фанфики из fic.json для офлайн-режима: [(фанфик, роль, readonly)] и ошибки.
 
-        Повреждённый meta.json пропускается, чтобы не прятать остальные фанфики;
+        Повреждённый fic.json пропускается, чтобы не прятать остальные фанфики;
         его ошибку показывает UI.
         """
         fics: list[tuple[Fic, Role, bool]] = []
         errors: list[str] = []
-        for path in sorted(self.fics.glob("*/meta.json")):
+        for path in sorted(self.fics.glob("*/fic.json")):
             try:
-                data = json.loads(_read(path))
-                role, readonly = data["role"], data["readonly"]
-                # иначе фанфик молча пропадёт из всех разделов списка
-                if role not in get_args(Role) or not isinstance(readonly, bool):
-                    raise ValueError(f"роль {role!r}, readonly {readonly!r}")
-                chapters = [SlimChapterInfo(**ch) for ch in data["chapters"]]
-                fics.append(
-                    (Fic(path.parent.name, data["title"], chapters), role, readonly)
-                )
-            except OSError, ValueError, TypeError, KeyError:
+                fics.append(self._read_fic(path))
+            except OSError, ValueError:
                 errors.append(f"Файл {path} повреждён")
         return fics, errors
+
+    @staticmethod
+    def _read_fic(path: Path) -> tuple[Fic, Role, bool]:
+        try:
+            data = json.loads(_read(path))
+            role, readonly = data["role"], data["readonly"]
+            # иначе фанфик молча пропадёт из всех разделов списка
+            if role not in get_args(Role) or not isinstance(readonly, bool):
+                raise ValueError(f"роль {role!r}, readonly {readonly!r}")
+            chapters = [SlimChapterInfo(**ch) for ch in data["chapters"]]
+            return Fic(path.parent.name, data["title"], chapters), role, readonly
+        except (ValueError, TypeError, KeyError) as e:
+            raise ValueError(f"Файл {path} повреждён") from e
 
     def read_draft(self, fic_id: str, chapter_id: str) -> str | None:
         """None, если локальной копии главы нет."""
@@ -126,6 +159,7 @@ class ChapterStorage:
             return None
 
     def write_draft(self, fic_id: str, chapter_id: str, text: str) -> None:
+        """Ввод пользователя; слияние и восстановление сначала делают add_version."""
         _write(self._chapter(fic_id, chapter_id) / "draft.txt", text)
 
     def read_chapter(self, fic_id: str, chapter_id: str) -> ChapterMeta:
@@ -137,13 +171,26 @@ class ChapterStorage:
         except (ValueError, TypeError, KeyError, AttributeError) as e:
             raise ValueError(f"Файл {path} повреждён") from e
 
-    def write_chapter(self, fic_id: str, chapter_id: str, chapter: ChapterMeta) -> None:
+    def _load_chapter(self, fic_id: str, chapter_id: str, title: str) -> ChapterMeta:
+        """Нет chapter.json - пустая история; повреждённый - ValueError, не затираем."""
+        try:
+            return self.read_chapter(fic_id, chapter_id)
+        except FileNotFoundError:
+            return ChapterMeta(title)
+
+    def _write_chapter(
+        self, fic_id: str, chapter_id: str, chapter: ChapterMeta
+    ) -> None:
         data = asdict(chapter)
         # у site и publish null осмыслен (site_rev последней ревизии), у manual полей нет
         for v in data["versions"]:
             if v["source"] == "manual":
                 del v["site_rev"], v["site_num"], v["author"]
         _write(self._chapter(fic_id, chapter_id) / "chapter.json", _dump(data))
+
+    def set_title(self, fic_id: str, chapter_id: str, title: str) -> None:
+        chapter = self._load_chapter(fic_id, chapter_id, title)
+        self._write_chapter(fic_id, chapter_id, replace(chapter, title=title))
 
     def read_version(self, fic_id: str, chapter_id: str, file: str) -> str:
         return _read(self._chapter(fic_id, chapter_id) / "versions" / file)
@@ -152,7 +199,6 @@ class ChapterStorage:
         self,
         fic_id: str,
         chapter_id: str,
-        chapter: ChapterMeta,
         text: str,
         title: str,
         source: Source,
@@ -163,10 +209,12 @@ class ChapterStorage:
         site_num: int | None = None,
         author: str | None = None,
     ) -> Version:
-        """Снимок text в versions/ и запись о нём в chapter и chapter.json.
+        """Снимок text в versions/ и запись о нём в chapter.json.
 
         created по умолчанию - текущее время; у ревизий сайта - дата с сайта.
         """
+        # до снимка: при повреждённом chapter.json не будет лишнего файла
+        chapter = self._load_chapter(fic_id, chapter_id, title)
         now = datetime.now()  # noqa: DTZ005 локальное время без пояса, как даты на сайте
         versions = self._chapter(fic_id, chapter_id) / "versions"
         stem = now.strftime("%Y-%m-%dT%H-%M-%S")
@@ -188,7 +236,7 @@ class ChapterStorage:
             author=author,
         )
         chapter.versions.append(version)
-        self.write_chapter(fic_id, chapter_id, chapter)
+        self._write_chapter(fic_id, chapter_id, chapter)
         return version
 
     def new_chapter_id(self, fic_id: str) -> str:
@@ -204,7 +252,7 @@ class ChapterStorage:
             return chapter_id
 
     def new_chapters(self, fic_id: str) -> list[SlimChapterInfo]:
-        """Неотправленные new-N с текстом: их нет ни в meta.json, ни на сайте.
+        """Неотправленные new-N с текстом: их нет ни в fic.json, ни на сайте.
 
         Название - из chapter.json, а если его нет или он повреждён - id,
         чтобы текст всё равно можно было открыть.
@@ -226,23 +274,23 @@ class ChapterStorage:
         return chapters
 
     def rename_chapter(self, fic_id: str, old_id: str, new_id: str, title: str) -> None:
-        """new-N -> id с сайта после создания главы; глава дописывается в meta.json.
+        """new-N -> id с сайта после создания главы; глава дописывается в fic.json.
 
-        Сначала meta.json, потом папка: при сбое на любом шаге текст остаётся
+        Сначала fic.json, потом папка: при сбое на любом шаге текст остаётся
         в new-N и виден через new_chapters(), а переименованную папку
-        без записи в meta.json не нашёл бы ни один список.
+        без записи в fic.json не нашёл бы ни один список.
 
         Риск дубля: при ошибке глава уже создана на сайте, а текст лежит
         в new-N; повторная отправка new-N создаст на сайте вторую главу.
         Предупреждать об этом должен UI отправки.
         """
-        path = self.fics / fic_id / "meta.json"
-        try:
-            data = json.loads(_read(path))
-            # глава уже есть, если список успели обновить с сайта
-            if all(ch["id"] != new_id for ch in data["chapters"]):
-                data["chapters"].append({"id": new_id, "title": title})
-        except (ValueError, TypeError, KeyError, AttributeError) as e:
-            raise ValueError(f"Файл {path} повреждён") from e
-        _write(path, _dump(data))
-        self._chapter(fic_id, old_id).rename(self._chapter(fic_id, new_id))
+        new = self._chapter(fic_id, new_id)
+        # до записи fic.json: rename на занятую папку ведёт себя по-разному в разных ОС
+        if new.exists():
+            raise FileExistsError(f"Папка {new} уже существует")
+        fic, role, readonly = self._read_fic(self.fics / fic_id / "fic.json")
+        # глава уже есть, если список успели обновить с сайта
+        if all(ch.id != new_id for ch in fic.chapters):
+            fic.chapters.append(SlimChapterInfo(new_id, title))
+        self.write_fic(fic, role, readonly)
+        self._chapter(fic_id, old_id).rename(new)
