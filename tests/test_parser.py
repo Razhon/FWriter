@@ -137,7 +137,7 @@ def test_login(monkeypatch, response: httpx.Response, ok: bool):
 
     if ok:
         api = asyncio.run(login)
-        assert api.user == UserInfo(42, "Серый – Кот")
+        assert api.user == UserInfo("42", "Серый – Кот")
         assert not closed
     else:
         with pytest.raises(LoginFailedError):
@@ -239,3 +239,13 @@ def test_get_chapter_beta():
 def test_get_chapter_changed_layout_raises(old: str, new: str, what: str):
     with pytest.raises(APIChangedError, match=what):
         get_chapter(chapter_page("author_draft").replace(old, new, 1))
+
+
+@pytest.mark.parametrize(
+    ("name", "slug"),
+    [("old", "3001"), ("new", "00000000-0000-7000-8000-000000003002")],
+)
+def test_parse_user_slug(name: str, slug: str):
+    """У нового аккаунта в ссылке на профиль UUID, а не числовой id."""
+    html = (FIXTURES / f"index_{name}_account_raw.html").read_text(encoding="utf-8")
+    assert FicbookAPI._parse_user(html).slug == slug

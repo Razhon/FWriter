@@ -35,7 +35,8 @@ class FicbookAPI:
         "gamma": "/home/assistant_fanfics/gamma",
     }
 
-    _USER_ID_RE = re.compile(r"/authors/(\d+)")
+    # slug, а не id: у новых аккаунтов в ссылке UUID
+    _USER_SLUG_RE = re.compile(r"/authors/([^/?#]+)")
     _CHAPTER_RE = re.compile(r"/home/myfics/(\d+)/parts/(\d+)")
     # div.profile-area есть в шапке любой страницы, пока сессия жива
     _PROFILE_AREA_RE = re.compile(r'class="(?:[^"]*\s)?profile-area[\s"]')
@@ -98,17 +99,17 @@ class FicbookAPI:
 
     @classmethod
     def _parse_user(cls, html: str) -> UserInfo:
-        """Id и ник из шапки любой страницы, где пользователь вошёл."""
+        """Slug и ник из шапки любой страницы, где пользователь вошёл."""
         soup = BeautifulSoup(html, "html.parser")
         # наличие блока уже проверил _get
         profile_area = req(soup.find("div", class_="profile-area"), "блок профиля")
         link = req(profile_area.select_one('a[href*="/authors/"]'), "ссылка на профиль")
-        match = req(cls._USER_ID_RE.search(str(link.get("href", ""))), "id автора")
+        match = req(cls._USER_SLUG_RE.search(str(link.get("href", ""))), "slug автора")
         avatar = req(
             soup.select_one(".btn-top-bar-profile-menu img[alt]"), "аватар с ником"
         )
         name = req(str(avatar.get("alt", "")).strip(), "ник в аватаре")
-        return UserInfo(int(match.group(1)), name)
+        return UserInfo(match.group(1), name)
 
     async def get_fics(self, role: Role) -> list[Fic]:
         """Список фанфиков с правами role (ключ FIC_LISTS)."""

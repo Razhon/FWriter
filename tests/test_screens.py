@@ -27,7 +27,7 @@ def test_titles_are_plain_text():
     tricky = "[Kot] a[/]b"
 
     api = FicbookAPI({})
-    api.user = UserInfo(1, tricky)
+    api.user = UserInfo("1", tricky)
 
     async def fake_get_fics(role: str) -> list[Fic]:
         return [Fic("1", tricky, [])] if role == "author" else []
@@ -69,7 +69,7 @@ def test_broken_keyring_opens_login(monkeypatch, caplog):
 
 def test_failed_fic_list_keeps_others():
     api = FicbookAPI({})
-    api.user = UserInfo(1, "Кот")
+    api.user = UserInfo("1", "Кот")
 
     async def fake_get_fics(role: str) -> list[Fic]:
         if role in ("coauthor", "beta"):
@@ -205,7 +205,7 @@ def test_non_ascii_user_agent_is_rejected(monkeypatch):
 
 def test_new_chapter_only_for_managers():
     api = FicbookAPI({})
-    api.user = UserInfo(1, "Кот")
+    api.user = UserInfo("1", "Кот")
 
     async def fake_get_fics(role: str) -> list[Fic]:
         return [Fic("1", role, [])]
@@ -233,7 +233,7 @@ def test_new_chapter_only_for_managers():
 def test_expired_session_opens_login(monkeypatch):
     monkeypatch.setattr(SecretStorage, "get_auth", lambda: ({"rme": "1"}, "ua"))
     api = FicbookAPI({})
-    api.user = UserInfo(1, "Кот")
+    api.user = UserInfo("1", "Кот")
 
     async def fake_login(cookies, user_agent):
         return api
@@ -269,7 +269,7 @@ FIC = Fic("00000000", "Фанфик", [SlimChapterInfo("00000000", "Глава")
 
 def api_without_fics() -> FicbookAPI:
     api = FicbookAPI({})
-    api.user = UserInfo(1, "user-1")
+    api.user = UserInfo("1", "user-1")
 
     async def no_fics(role: str) -> list[Fic]:
         return []

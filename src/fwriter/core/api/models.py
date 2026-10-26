@@ -13,7 +13,7 @@ def can_manage(role: Role, readonly: bool) -> bool:
 
 @dataclass(frozen=True)
 class UserInfo:
-    id: int
+    slug: str  # как author у ревизий сайта
     name: str
 
 
