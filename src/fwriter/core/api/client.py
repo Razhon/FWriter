@@ -98,11 +98,8 @@ class FicbookAPI:
     def _parse_user(cls, html: str) -> UserInfo:
         """Id и ник из шапки любой страницы, где пользователь вошёл."""
         soup = BeautifulSoup(html, "html.parser")
-        profile_area = soup.find("div", class_="profile-area")
-        if not profile_area:
-            raise UserNotLoggedInError(
-                "На странице нет блока профиля: cookies недействительны"
-            )
+        # наличие блока уже проверил _get
+        profile_area = req(soup.find("div", class_="profile-area"), "блок профиля")
         link = req(profile_area.select_one('a[href*="/authors/"]'), "ссылка на профиль")
         match = req(cls._USER_ID_RE.search(str(link.get("href", ""))), "id автора")
         avatar = req(
@@ -204,7 +201,7 @@ class FicbookAPI:
     async def _post(self, *args, **kwargs) -> httpx.Response:
         response = await self.client.post(*args, **kwargs)
         self._raise_if_logged_out(response)
-        if not response.is_redirect:  # откат версии отвечает 302 на главу
+        if not response.has_redirect_location:  # откат версии отвечает 302 на главу
             response.raise_for_status()
         return response
 
@@ -212,6 +209,6 @@ class FicbookAPI:
     def _raise_if_logged_out(response: httpx.Response) -> None:
         if (
             response.is_redirect
-            and httpx.URL(response.headers["location"]).path == "/login"
+            and httpx.URL(response.headers.get("location", "")).path == "/login"
         ):
             raise UserNotLoggedInError("Сессия истекла: сайт перенаправил на /login")

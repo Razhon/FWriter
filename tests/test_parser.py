@@ -146,17 +146,21 @@ def test_expired_session_get_raises():
 
 
 @pytest.mark.parametrize(
-    ("location", "logged_out"),
-    [("https://ficbook.net/login", True), ("/home/myfics/1/parts/2", False)],
+    ("headers", "error"),
+    [
+        ({"location": "https://ficbook.net/login"}, UserNotLoggedInError),
+        ({"location": "/home/myfics/1/parts/2"}, None),  # откат отвечает 302 на главу
+        ({}, httpx.HTTPStatusError),  # 3xx без Location
+    ],
 )
-def test_post_redirect(location: str, logged_out: bool):
-    api = mock_api(lambda _: httpx.Response(302, headers={"location": location}))
+def test_post_redirect(headers: dict[str, str], error: type[Exception] | None):
+    api = mock_api(lambda _: httpx.Response(302, headers=headers))
     post = api._post("/home/versions/revert_part_version")
 
-    if logged_out:
-        with pytest.raises(UserNotLoggedInError):
+    if error:
+        with pytest.raises(error):
             asyncio.run(post)
-    else:  # откат отвечает 302 на главу
+    else:
         assert asyncio.run(post).status_code == 302
 
 
