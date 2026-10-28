@@ -18,7 +18,13 @@ from fwriter.core.api.errors import (
 from fwriter.core.api.models import Chapter, Fic, SlimChapterInfo, UserInfo
 from fwriter.core.storage import ChapterStorage
 from fwriter.run import FWriterApp, setup_logging
-from fwriter.screens import ErrorScreen, LoginScreen, MainScreen, SessionExpired
+from fwriter.screens import (
+    ConnectingScreen,
+    ErrorScreen,
+    LoginScreen,
+    MainScreen,
+    SessionExpired,
+)
 from fwriter.screens.api_errors import report_api_error
 from fwriter.screens.chapter import ChapterTab
 from fwriter.screens.main import FIC_SECTIONS, ChapterButton
@@ -1065,5 +1071,69 @@ def test_manual_login_without_network_stays_on_login(monkeypatch):
             assert [n.message for n in pilot.app._notifications] == [
                 "Не удалось войти\nНет связи с сайтом"
             ]
+
+    asyncio.run(run())
+
+
+def test_connecting_screen_go_offline(tmp_path, monkeypatch):
+    """Пока идёт вход - экран подключения; "Работать офлайн" не ждёт таймаута."""
+    monkeypatch.setattr(SecretStorage, "get_auth", lambda: ({"rme": "1"}, "ua"))
+    offline_storage(tmp_path)
+    cancelled: list[bool] = []
+
+    async def hanging_login(cookies, user_agent):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    monkeypatch.setattr(FicbookAPI, "login", hanging_login)
+
+    async def run():
+        app = FWriterApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert isinstance(app.screen, ConnectingScreen)
+            await pilot.click("#offline")
+            await pilot.pause()
+            assert isinstance(app.screen, MainScreen)
+            assert app.main_screen and app.main_screen.api is None
+            assert cancelled
+
+    asyncio.run(run())
+
+
+def test_relogin_button_shows_attempt(tmp_path, monkeypatch):
+    """Во время повтора кнопка неактивна, после неудачи - снова "Повторить вход"."""
+    monkeypatch.setattr(SecretStorage, "get_auth", lambda: ({"rme": "1"}, "ua"))
+    attempt = asyncio.Event()
+
+    async def no_network(cookies, user_agent):
+        await attempt.wait()
+        raise NetworkError("Нет связи с сайтом")
+
+    monkeypatch.setattr(FicbookAPI, "login", no_network)
+
+    async def run():
+        app = FWriterApp()
+        async with app.run_test() as pilot:
+            attempt.set()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            btn = app.screen.query_one(".relogin_btn", Label)
+            assert str(btn.render()) == "Повторить вход"
+
+            attempt.clear()
+            await pilot.click(".relogin_btn")
+            await pilot.pause()
+            assert str(btn.render()) == "Подключаемся…"
+            assert btn.disabled
+
+            attempt.set()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert str(btn.render()) == "Повторить вход"
+            assert not btn.disabled
 
     asyncio.run(run())

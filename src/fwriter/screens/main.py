@@ -319,7 +319,14 @@ class StartPageTab(TabPane):
 
     @on(ClickableLabel.Pressed, ".relogin_btn")
     def on_relogin_pressed(self) -> None:
+        self.set_connecting(True)
         self.post_message(StartPageTab.Relogin())
+
+    def set_connecting(self, connecting: bool) -> None:
+        """Пока идёт вход, кнопка повтора неактивна: иначе нажатие начинает его заново."""
+        btn = self.query_one(".relogin_btn", ClickableLabel)
+        btn.update("Подключаемся…" if connecting else "Повторить вход")
+        btn.disabled = connecting
 
     @on(ClickableLabel.Pressed, ".chapter_btn")
     def on_chapter_pressed(self, event: ClickableLabel.Pressed) -> None:

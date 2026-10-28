@@ -17,6 +17,7 @@ from .core.api.client import FicbookAPI
 from .core.api.errors import LoginFailedError, NetworkError, SiteError
 from .core.storage import DATA_DIR, lock_data_dir
 from .screens import *
+from .screens.main import StartPageTab
 from .secrets import *
 
 log = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class FWriterApp(App):
 
     MODES: ClassVar[dict[str, str | Callable[[], Screen]]] = {
         "login": LoginScreen,
+        "connecting": ConnectingScreen,
     }
 
     main_screen: MainScreen | None = None
@@ -68,17 +70,33 @@ class FWriterApp(App):
             cookies, user_agent = None, None
 
         if not cookies or not user_agent:
+            self.relogin_done()
             self.switch_mode("login")
             return
+        # при запуске; повтор из офлайна показывает это на кнопке
+        if not self.main_screen:
+            self.switch_mode("connecting")
         self.login_saved(cookies, user_agent)
 
+    def on_connecting_screen_go_offline(self) -> None:
+        if self.current_mode != "connecting":  # вход уже закончился
+            return
+        self.workers.cancel_group(self, "login")
+        self.open_main(None)
+
+    def relogin_done(self) -> None:
+        """Попытка входа из офлайна закончилась: кнопку повтора - обратно."""
+        if self.main_screen and self.main_screen.api is None:
+            self.main_screen.query_one(StartPageTab).set_connecting(False)
+
     # в воркере, чтобы приложение отвечало на клавиши, пока идёт запрос
-    @work(exclusive=True)
+    @work(exclusive=True, group="login")
     async def login_saved(self, cookies: dict[str, str], user_agent: str) -> None:
         try:
             api = await FicbookAPI.login(cookies, user_agent)
         except LoginFailedError as e:
             log.warning("вход по сохранённым cookies не удался", exc_info=True)
+            self.relogin_done()
             self.switch_mode("login")
             self.push_screen(ErrorScreen(f"Не удалось войти: {e}"))
             return
@@ -86,13 +104,16 @@ class FWriterApp(App):
             log.warning("сайт недоступен, работаем офлайн", exc_info=True)
             self.notify(f"{e}. Работаем офлайн", severity="warning")
             # повтор из офлайна: открытые вкладки не закрываем
-            if not (self.main_screen and self.main_screen.api is None):
+            if self.main_screen and self.main_screen.api is None:
+                self.relogin_done()
+            else:
                 self.open_main(None)
             return
         # здесь main_screen - только офлайн; как при истёкшей сессии, без записи
         # черновиков экран не снимаем, иначе правки пропадут вместе с вкладками
         if self.main_screen and not self.main_screen.save_all(notify=False):
             await api.close()
+            self.relogin_done()
             self.notify(
                 "Не удалось записать черновик на диск, остаёмся офлайн",
                 severity="error",
