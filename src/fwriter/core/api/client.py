@@ -10,7 +10,15 @@ import httpx
 from bs4 import BeautifulSoup, Tag
 
 from .errors import *
-from .models import Chapter, Fic, Role, SlimChapterInfo, UserInfo
+from .models import (
+    Chapter,
+    Fic,
+    Revision,
+    RevisionInfo,
+    Role,
+    SlimChapterInfo,
+    UserInfo,
+)
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +49,35 @@ class FicbookAPI:
     # slug, а не id: у новых аккаунтов в ссылке UUID
     _USER_SLUG_RE = re.compile(r"/authors/([^/?#]+)")
     _CHAPTER_RE = re.compile(r"/home/myfics/(\d+)/parts/(\d+)")
+    REVERT_URL = "/home/versions/revert_part_version"
+    _HISTORY_RE = re.compile(
+        r"^/home/versions/(mine|participated)/(\d+)/parts/(\d+)/history$"
+    )
+    _REVISION_RE = re.compile(
+        r"^/home/versions/(?:mine|participated)/\d+/history/(\w+)$"
+    )
+    _REVISION_DATE_RE = re.compile(r"Изменения от (\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)")
+    _LIST_DATE_RE = re.compile(r"(\d{1,2}) (\w+) (\d{4}) г\., (\d\d:\d\d)")
+    MONTHS: ClassVar[dict[str, int]] = {
+        name: number
+        for number, name in enumerate(
+            [
+                "января",
+                "февраля",
+                "марта",
+                "апреля",
+                "мая",
+                "июня",
+                "июля",
+                "августа",
+                "сентября",
+                "октября",
+                "ноября",
+                "декабря",
+            ],
+            start=1,
+        )
+    }
     # div.profile-area есть в шапке любой страницы, пока сессия жива
     _PROFILE_AREA_RE = re.compile(r'class="(?:[^"]*\s)?profile-area[\s"]')
 
@@ -201,7 +238,8 @@ class FicbookAPI:
 
     async def get_chapter(self, fic_id: str, chapter_id: str) -> Chapter:
         """Текст, название и статус главы со страницы её редактирования."""
-        form, content = await self._chapter_form(fic_id, chapter_id)
+        soup, form, content = await self._chapter_form(fic_id, chapter_id)
+        history = req(soup.find("a", href=self._HISTORY_RE), "ссылка на историю")
         title_input = req(form.find("input", attrs={"name": "title"}), "поле названия")
         # кнопок статуса нет у беты; если они есть, одна обязана быть отмечена
         params = form.find_all("input", attrs={"name": "param"})
@@ -217,10 +255,13 @@ class FicbookAPI:
             content=content,
             title_editable=not title_input.has_attr("disabled"),
             status=int(status) if status is not None else None,
+            history_url=str(history["href"]),
         )
 
-    async def _chapter_form(self, fic_id: str, chapter_id: str) -> tuple[Tag, str]:
-        """Форма со страницы главы и текст главы на сайте."""
+    async def _chapter_form(
+        self, fic_id: str, chapter_id: str
+    ) -> tuple[BeautifulSoup, Tag, str]:
+        """Страница главы, форма с неё и текст главы на сайте."""
         response = await self._get(f"/home/myfics/{fic_id}/parts/{chapter_id}")
         soup = BeautifulSoup(response.text, "html.parser")
         form = req(soup.find("form", id="savePartForm"), "форма главы (savePartForm)")
@@ -228,14 +269,14 @@ class FicbookAPI:
         content = editor.get("initial-value")
         if content is None:  # пустой текст допустим, отсутствие атрибута - нет
             raise APIChangedError("Не найдено на странице: текст главы (initial-value)")
-        return form, str(content)
+        return soup, form, str(content)
 
     async def save_chapter(
         self, fic_id: str, chapter_id: str, content: str, title: str, base: str
     ) -> None:
         """Текст и название; base - текст сайта, от которого шёл черновик."""
         # свежая форма: старая откатила бы статус, поменянный на сайте
-        form, site_content = await self._chapter_form(fic_id, chapter_id)
+        _, form, site_content = await self._chapter_form(fic_id, chapter_id)
         if site_content != base:
             raise ChapterChangedError()
         url = str(req(form.get("action"), "адрес сохранения (action)"))
@@ -270,6 +311,98 @@ class FicbookAPI:
     ) -> None:
         """Опубликовать, скрыть в черновики или отменить отложенную публикацию."""
         await self._post_form(f"/home/myfics/{action}", [("part_id", chapter_id)])
+
+    @staticmethod
+    def participated_history_url(fic_id: str, chapter_id: str) -> str:
+        """История при readonly: страницы главы нет, а mine отвечает 404."""
+        return f"/home/versions/participated/{fic_id}/parts/{chapter_id}/history"
+
+    @classmethod
+    def last_revision_url(cls, history_url: str) -> str:
+        match = req(
+            cls._HISTORY_RE.match(history_url), f"адрес истории ({history_url})"
+        )
+        kind, _, chapter_id = match.groups()
+        return f"/home/versions/{kind}/{chapter_id}/history/last"
+
+    async def get_chapter_revisions(self, history_url: str) -> list[RevisionInfo]:
+        """Список правок, от новой к старой."""
+        response = await self._get(history_url)
+        soup = BeautifulSoup(response.text, "html.parser")
+        table = req(soup.select_one("main table"), "таблица правок")
+        revisions = []
+        for row in table.select("tbody tr"):
+            cells = row.find_all("td", recursive=False)
+            if len(cells) != 5:
+                raise APIChangedError(f"В строке правки {len(cells)} ячеек, а не 5")
+            num = cells[0].get_text(strip=True)
+            if not num.isdecimal():
+                raise APIChangedError(f"Нечисловой номер правки: {num}")
+            date = req(cells[1].find("span", title=True), "дата правки")
+            author = req(cells[2].find("a", href=True), "автор правки")
+            link = req(cells[4].find("a", href=True), "ссылка на правку")
+            url = str(link["href"])
+            rev = req(self._REVISION_RE.match(url), f"адрес правки ({url})").group(1)
+            if rev != "last" and not rev.isdecimal():
+                raise APIChangedError(f"Нечисловой id правки: {rev}")
+            revisions.append(
+                RevisionInfo(
+                    num=int(num),
+                    url=url,
+                    rev_id=None if rev == "last" else rev,
+                    author=self._author_slug(author),
+                    author_name=author.get_text(strip=True),
+                    comment=cells[3].get_text(strip=True),
+                    created=self._parse_list_date(str(date["title"])),
+                )
+            )
+        return revisions
+
+    async def get_revision(self, url: str) -> Revision:
+        """Страница правки: дата, автор, пояснение и текст после неё."""
+        response = await self._get(url)
+        soup = BeautifulSoup(response.text, "html.parser")
+        main = req(soup.find("main"), "основная часть страницы правки")
+        header = req(main.find("h1"), "заголовок правки").get_text(" ", strip=True)
+        created = None
+        if match := self._REVISION_DATE_RE.search(header):
+            created = f"{match.group(1)}T{match.group(2)}"
+        elif "Изначальная версия текста" not in header:
+            raise APIChangedError(f"Неизвестный заголовок правки: {header}")
+        author = req(main.find("a", href=self._USER_SLUG_RE), "автор правки")
+        comment = main.select_one("p.text-muted")
+        after = req(main.find("div", id="after"), "текст после правки (#after)")
+        return Revision(
+            created=created,
+            author=self._author_slug(author),
+            author_name=author.get_text(strip=True),
+            comment=comment.get_text(strip=True) if comment else "",
+            content=after.get_text(),
+            can_revert=main.find("form", action=self.REVERT_URL) is not None,
+        )
+
+    async def revert_revision(self, url: str) -> None:
+        """Откат главы на сайте к правке url; сайт создаёт новую правку."""
+        response = await self._get(url)
+        soup = BeautifulSoup(response.text, "html.parser")
+        form = req(soup.find("form", action=self.REVERT_URL), "форма отката")
+        response = await self._post(self.REVERT_URL, data=dict(self._form_fields(form)))
+        # успех - 302 на главу, ошибки (400, 403, 404) - HTML
+        if not response.has_redirect_location:
+            raise APIChangedError(f"Откат ответил {response.status_code}, а не 302")
+
+    @classmethod
+    def _author_slug(cls, link: Tag) -> str:
+        href = str(link["href"])
+        return req(cls._USER_SLUG_RE.search(href), f"slug автора ({href})").group(1)
+
+    @classmethod
+    def _parse_list_date(cls, text: str) -> str:
+        """'26 октября 2026 г., 02:05' -> '2026-10-26T02:05'."""
+        match = req(cls._LIST_DATE_RE.fullmatch(text), f"дата правки ({text})")
+        day, month, year, time_ = match.groups()
+        number = req(cls.MONTHS.get(month), f"месяц ({month})")
+        return f"{year}-{number:02}-{int(day):02}T{time_}"
 
     @staticmethod
     def _form_fields(form) -> list[tuple[str, str]]:

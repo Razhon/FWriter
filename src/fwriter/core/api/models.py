@@ -38,3 +38,29 @@ class Chapter:
     content: str
     title_editable: bool  # у беты поле названия disabled
     status: int | None  # param: 1 черновик, 2 опубликована, 3 позже; None не у автора
+    history_url: str  # mine или participated - как дал сайт, без выбора по роли
+
+
+@dataclass
+class RevisionInfo:
+    """Строка списка правок."""
+
+    num: int
+    url: str
+    rev_id: str | None  # у последней правки id не виден
+    author: str  # slug
+    author_name: str
+    comment: str
+    created: str  # ISO до минуты, из title даты
+
+
+@dataclass
+class Revision:
+    """Страница одной правки."""
+
+    created: str | None  # ISO до секунды; у изначальной версии None
+    author: str
+    author_name: str
+    comment: str
+    content: str
+    can_revert: bool

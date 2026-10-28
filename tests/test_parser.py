@@ -19,7 +19,7 @@ from fwriter.core.api.errors import (
     SiteRejectedError,
     UserNotLoggedInError,
 )
-from fwriter.core.api.models import Chapter, Role, UserInfo
+from fwriter.core.api.models import Chapter, Revision, Role, UserInfo
 
 FIXTURES = Path(__file__).parent / "fixtures"
 BETA_PAGE = (FIXTURES / "assistant_fanfics-beta.html").read_text(encoding="utf-8")
@@ -238,6 +238,7 @@ def test_get_chapter_author(name: str, status: int, last_line: str):
         content=f"Лорем <b>ипсум</b>\n{last_line}",
         title_editable=True,
         status=status,
+        history_url="/home/versions/mine/1001/parts/2001/history",
     )
 
 
@@ -247,6 +248,7 @@ def test_get_chapter_beta():
     assert chapter.title == "Лорем 1. Ипсум долор"
     assert not chapter.title_editable
     assert chapter.status is None
+    assert chapter.history_url == "/home/versions/participated/1001/parts/2001/history"
     assert chapter.content.startswith("Лорем ипсум долор, сит амет")
     assert chapter.content.endswith("долор сит амет консектетур адиписцинг.")
 
@@ -514,3 +516,187 @@ def test_set_chapter_status(action):
 
     asyncio.run(mock_api(handler).set_chapter_status("2001", action))
     assert sent == [(f"/home/myfics/{action}", "part_id=2001")]
+
+
+def history_page(name: str) -> str:
+    return (FIXTURES / f"versions-{name}.html").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("kind", "count", "last"),
+    [("mine", 5, ("user-1", "3001")), ("participated", 32, ("user-2", "3002"))],
+)
+def test_get_chapter_revisions(kind: str, count: int, last: tuple[str, str]):
+    url = f"/home/versions/{kind}/1001/parts/2001/history"
+    html = history_page(f"{kind}-00000000-parts-00000000-history")
+    revisions = fetch(html, lambda api: api.get_chapter_revisions(url), url)
+
+    assert [r.num for r in revisions] == list(range(count, 0, -1))
+    newest, oldest = revisions[0], revisions[-1]
+    # у последней правки id не виден, у остальных есть
+    assert newest.rev_id is None
+    assert newest.url == f"/home/versions/{kind}/2001/history/last"
+    assert all(r.rev_id and r.rev_id.isdecimal() for r in revisions[1:])
+    assert oldest.url == f"/home/versions/{kind}/2001/history/{oldest.rev_id}"
+    assert (newest.author_name, newest.author) == ("user-1", "3001")
+    assert (oldest.author_name, oldest.author) == last
+    assert newest.comment.startswith("возврат к версии от")
+    assert all(len(r.created) == len("2026-10-26T02:05") for r in revisions)
+
+
+def test_get_chapter_revisions_date_from_title():
+    url = "/home/versions/mine/1001/parts/2001/history"
+    html = history_page("mine-00000000-parts-00000000-history")
+    revisions = fetch(html, lambda api: api.get_chapter_revisions(url), url)
+    # в тексте "1 минуту назад", абсолютная дата - только в title
+    assert revisions[0].created == "2026-10-26T02:05"
+
+
+@pytest.mark.parametrize(
+    ("text", "iso"),
+    [
+        ("26 октября 2026 г., 02:05", "2026-10-26T02:05"),
+        ("1 мая 2026 г., 14:47", "2026-05-01T14:47"),
+    ],
+)
+def test_parse_list_date(text: str, iso: str):
+    assert FicbookAPI._parse_list_date(text) == iso
+
+
+@pytest.mark.parametrize("text", ["1 минуту назад", "26 октябрь 2026 г., 02:05"])
+def test_parse_list_date_unknown_raises(text: str):
+    with pytest.raises(APIChangedError):
+        FicbookAPI._parse_list_date(text)
+
+
+@pytest.mark.parametrize(
+    ("name", "created", "author", "can_revert"),
+    [
+        ("mine-00000000-history-00000000", "2026-10-26T00:33:30", "3001", True),
+        ("mine-00000000-history-00000000_initial", None, "3001", True),
+        ("participated-00000000-history-00000000", "2026-09-12T21:47:07", "3002", True),
+        ("participated-00000000-history-last", "2026-10-26T00:32:52", "3001", False),
+    ],
+)
+def test_get_revision(name: str, created: str | None, author: str, can_revert: bool):
+    url = "/home/versions/mine/2001/history/9001"
+    revision = fetch(history_page(name), lambda api: api.get_revision(url), url)
+
+    assert revision.created == created
+    assert revision.author == author
+    assert revision.author_name == f"user-{author[-1]}"
+    assert revision.can_revert == can_revert
+
+
+def test_get_revision_text_and_comment():
+    url = "/home/versions/participated/2001/history/last"
+    html = history_page("participated-00000000-history-last")
+    revision = fetch(html, lambda api: api.get_revision(url), url)
+
+    assert revision.comment == "возврат к версии от 24 сентября 2026 г., 14:47"
+    # #after - сырая разметка главы, сущности раскрыты
+    assert "<center>«Амет консектетур», — адиписцинг элит сед до.</center>" in (
+        revision.content
+    )
+    assert "&lt;" not in revision.content
+
+
+def test_get_revision_text_matches_chapter():
+    # синхронизация сравнивает #after с текстом главы: расхождение даст ложную правку
+    url = "/home/versions/mine/2001/history/9001"
+    html = history_page("mine-00000000-history-00000000_raw")
+    revision = fetch(html, lambda api: api.get_revision(url), url)
+    assert revision.content == get_chapter(chapter_page("author_draft")).content
+
+
+def test_get_revision_initial():
+    url = "/home/versions/mine/2001/history/9001"
+    html = history_page("mine-00000000-history-00000000_initial")
+    revision = fetch(html, lambda api: api.get_revision(url), url)
+    assert revision == Revision(
+        created=None,
+        author="3001",
+        author_name="user-1",
+        comment="",
+        content="лорем",
+        can_revert=True,
+    )
+
+
+def test_get_revision_keeps_entities():
+    # так сайт отдал "a &lt; b &amp; c & d": каждый & экранирован
+    html = history_page("mine-00000000-history-00000000").replace(
+        '<div id="after" style="display: none;">лорем</div>',
+        '<div id="after" style="display: none;">a &amp;lt; b &amp;amp; c &amp; d</div>',
+    )
+    url = "/home/versions/mine/2001/history/9001"
+    revision = fetch(html, lambda api: api.get_revision(url), url)
+    assert revision.content == "a &lt; b &amp; c & d"
+
+
+def test_get_revision_unknown_header_raises():
+    html = history_page("mine-00000000-history-00000000").replace(
+        "Изменения от", "Правка от", 1
+    )
+    url = "/home/versions/mine/2001/history/9001"
+    with pytest.raises(APIChangedError, match="заголовок правки"):
+        fetch(html, lambda api: api.get_revision(url), url)
+
+
+def test_history_urls():
+    assert (
+        FicbookAPI.last_revision_url("/home/versions/mine/1001/parts/2001/history")
+        == "/home/versions/mine/2001/history/last"
+    )
+    participated = FicbookAPI.participated_history_url("1001", "2001")
+    assert participated == "/home/versions/participated/1001/parts/2001/history"
+    assert FicbookAPI.last_revision_url(participated) == (
+        "/home/versions/participated/2001/history/last"
+    )
+    with pytest.raises(APIChangedError):
+        FicbookAPI.last_revision_url("/home/versions")
+
+
+def revert(answer: httpx.Response, name: str = "mine-00000000-history-00000000"):
+    sent: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, text=history_page(name))
+        sent.append((request.url.path, parse_qsl(request.content.decode())))
+        return answer
+
+    url = "/home/versions/mine/2001/history/9001"
+    asyncio.run(mock_api(handler).revert_revision(url))
+    return sent
+
+
+def test_revert_revision():
+    sent = revert(
+        httpx.Response(302, headers={"location": "/home/myfics/1001/parts/2001"})
+    )
+    assert sent == [
+        (
+            "/home/versions/revert_part_version",
+            [("versionId", "9001"), ("do_submit", "Вернуться к этой версии")],
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("answer", "error"),
+    [
+        (httpx.Response(404), SiteError),
+        (httpx.Response(403), SiteError),
+        (httpx.Response(200, text="ok"), APIChangedError),
+    ],
+)
+def test_revert_revision_errors(answer: httpx.Response, error: type[Exception]):
+    with pytest.raises(error):
+        revert(answer)
+
+
+def test_revert_last_revision_raises():
+    # у последней правки вместо формы плашка "Это текущая версия"
+    with pytest.raises(APIChangedError, match="форма отката"):
+        revert(httpx.Response(302), "participated-00000000-history-last")

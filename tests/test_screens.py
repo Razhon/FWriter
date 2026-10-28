@@ -456,7 +456,7 @@ def test_chapter_tab_saves_draft(tmp_path, monkeypatch):
 
     async def fake_get_chapter(fic_id: str, chapter_id: str) -> Chapter:
         fetched.append(chapter_id)
-        return Chapter("Глава", "Текст.", title_editable=True, status=1)
+        return Chapter("Глава", "Текст.", title_editable=True, status=1, history_url="")
 
     api.get_fics = fake_get_fics
     api.get_chapter = fake_get_chapter
@@ -564,7 +564,7 @@ def test_click_while_loading_sends_one_request(tmp_path):
     async def fake_get_chapter(fic_id: str, chapter_id: str) -> Chapter:
         fetched.append(chapter_id)
         await response.wait()
-        return Chapter("Глава", "Текст.", title_editable=True, status=1)
+        return Chapter("Глава", "Текст.", title_editable=True, status=1, history_url="")
 
     api.get_chapter = fake_get_chapter
     storage = ChapterStorage(tmp_path)
