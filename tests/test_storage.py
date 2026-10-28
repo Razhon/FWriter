@@ -20,13 +20,25 @@ def test_version_adds_record(tmp_path):
     # два снимка подряд почти всегда в одну секунду: файлы не должны совпасть
     v1 = storage.add_version("1", "2", "раз", "Глава", "manual", "коммент")
     v2 = storage.add_version(
-        "1", "2", "два", "Глава", "site", site_num=3, author="user-1"
+        "1",
+        "2",
+        "два",
+        "Глава",
+        "site",
+        site_num=3,
+        author="00000000-0000-7000-8000-000000003001",
+        author_name="user-1",
     )
 
     assert v1.file != v2.file
     assert storage.read_chapter("1", "2") == ChapterMeta("Глава", versions=[v1, v2])
     assert v1.comment == "коммент"
-    assert (v2.site_num, v2.author, v2.site_rev) == (3, "user-1", None)
+    assert (v2.site_num, v2.author, v2.author_name, v2.site_rev) == (
+        3,
+        "00000000-0000-7000-8000-000000003001",
+        "user-1",
+        None,
+    )
     assert storage.read_version("1", "2", v1.file) == "раз"
     assert storage.read_version("1", "2", v2.file) == "два"
 
@@ -197,14 +209,20 @@ def test_broken_fic_json_skipped(tmp_path, broken: str):
 def test_manual_version_has_no_site_fields(tmp_path):
     storage = ChapterStorage(tmp_path)
     storage.add_version("1", "2", "раз", "Глава", "manual")
-    storage.add_version("1", "2", "два", "Глава", "site", author="user-1")
+    storage.add_version(
+        "1", "2", "два", "Глава", "site", author="3001", author_name="user-1"
+    )
 
     data = json.loads(
         (tmp_path / "fics" / "1" / "2" / "chapter.json").read_text("utf-8")
     )
     manual, site = data["versions"]
-    assert manual.keys().isdisjoint({"site_rev", "site_num", "author"})
-    assert (site["site_rev"], site["author"]) == (None, "user-1")
+    assert manual.keys().isdisjoint({"site_rev", "site_num", "author", "author_name"})
+    assert (site["site_rev"], site["author"], site["author_name"]) == (
+        None,
+        "3001",
+        "user-1",
+    )
     assert [v.source for v in storage.read_chapter("1", "2").versions] == [
         "manual",
         "site",

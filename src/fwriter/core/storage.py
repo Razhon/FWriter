@@ -29,7 +29,8 @@ class Version:
     comment: str = ""
     site_rev: str | None = None  # None у последней ревизии, пока не появится следующая
     site_num: int | None = None
-    author: str | None = None
+    author: str | None = None  # slug: ключ, не меняется
+    author_name: str | None = None  # ник, только для показа
 
 
 @dataclass
@@ -188,7 +189,7 @@ class ChapterStorage:
         # у site и publish null осмыслен (site_rev последней ревизии), у manual полей нет
         for v in data["versions"]:
             if v["source"] == "manual":
-                del v["site_rev"], v["site_num"], v["author"]
+                del v["site_rev"], v["site_num"], v["author"], v["author_name"]
         _write(self._chapter(fic_id, chapter_id) / "chapter.json", _dump(data))
 
     def set_title(self, fic_id: str, chapter_id: str, title: str) -> None:
@@ -211,6 +212,7 @@ class ChapterStorage:
         site_rev: str | None = None,
         site_num: int | None = None,
         author: str | None = None,
+        author_name: str | None = None,
     ) -> Version:
         """Снимок text в versions/ и запись о нём в chapter.json.
 
@@ -237,6 +239,7 @@ class ChapterStorage:
             site_rev=site_rev,
             site_num=site_num,
             author=author,
+            author_name=author_name,
         )
         chapter.versions.append(version)
         self._write_chapter(fic_id, chapter_id, chapter)
