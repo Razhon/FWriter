@@ -1,6 +1,9 @@
+import asyncio
 import json
 import logging
 import re
+import time
+from collections import deque
 from typing import ClassVar
 
 import httpx
@@ -41,6 +44,10 @@ class FicbookAPI:
     # div.profile-area есть в шапке любой страницы, пока сессия жива
     _PROFILE_AREA_RE = re.compile(r'class="(?:[^"]*\s)?profile-area[\s"]')
 
+    # Cloudflare: 16-й запрос за 10 с - 429 и блок на 20 с; лимит с запасом
+    RATE_LIMIT = 12
+    RATE_WINDOW = 10.0
+
     user: UserInfo | None = None
 
     def __init__(self, cookies: dict[str, str], user_agent: str | None = None):
@@ -51,6 +58,9 @@ class FicbookAPI:
             timeout=5.0,
             follow_redirects=False,
         )
+        self._throttle = asyncio.Lock()
+        # время начала последних RATE_LIMIT запросов
+        self._sent: deque[float] = deque(maxlen=self.RATE_LIMIT)
 
     @classmethod
     def parse_cookies(cls, text: str) -> dict[str, str] | None:
@@ -166,8 +176,22 @@ class FicbookAPI:
 
                     chapters.append(SlimChapterInfo(chapter_id, chapter_title))
 
-            fics.append(Fic(id=fic_id_raw, title=title, chapters=chapters))
+            fics.append(Fic(fic_id_raw, title, chapters))
         return fics
+
+    async def is_readonly(self, fic_id: str) -> bool:
+        """Список глав работы без права редактирования отвечает 404, с правом - 200.
+
+        Для карточек без глав: работу без прав от работы без глав в карточке
+        отличает только текст, код ответа надёжнее.
+        """
+        try:
+            await self._get(f"/home/myfics/{fic_id}/parts")
+        except SiteError as e:
+            if e.status == 404:
+                return True
+            raise
+        return False
 
     async def get_chapter(self, fic_id: str, chapter_id: str) -> Chapter:
         """Текст, название и статус главы со страницы её редактирования."""
@@ -212,6 +236,13 @@ class FicbookAPI:
 
     async def _send(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Ошибки httpx -> наши, с текстом для человека; UI про httpx не знает."""
+        # лок на ожидание, а не на запрос: окно считается по началам запросов
+        async with self._throttle:
+            if len(self._sent) == self._sent.maxlen:
+                delay = self._sent[0] + self.RATE_WINDOW - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+            self._sent.append(time.monotonic())
         try:
             response = await self.client.request(method, url, **kwargs)
         except httpx.TimeoutException as e:

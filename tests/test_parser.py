@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
@@ -183,7 +184,11 @@ def raise_(error: Exception):
     [
         (raise_(httpx.ConnectError("getaddrinfo failed")), "Нет связи с сайтом"),
         (raise_(httpx.ReadTimeout("")), "Сайт не ответил вовремя"),
-        (lambda _: httpx.Response(503), "Сайт ответил ошибкой 503"),
+        (lambda _: httpx.Response(503), "Сайт временно не работает (ошибка 503)"),
+        (lambda _: httpx.Response(400), "Сайт ответил ошибкой 400"),
+        (lambda _: httpx.Response(403), SiteError.TEXTS[403]),
+        (lambda _: httpx.Response(404), SiteError.TEXTS[404]),
+        (lambda _: httpx.Response(429), SiteError.TEXTS[429]),
     ],
 )
 def test_http_errors_become_api_errors(handler, text: str):
@@ -249,3 +254,55 @@ def test_parse_user_slug(name: str, slug: str):
     """У нового аккаунта в ссылке на профиль UUID, а не числовой id."""
     html = (FIXTURES / f"index_{name}_account_raw.html").read_text(encoding="utf-8")
     assert FicbookAPI._parse_user(html).slug == slug
+
+
+@pytest.mark.parametrize(("status", "readonly"), [(200, False), (404, True)])
+def test_is_readonly(status: int, readonly: bool):
+    """Работу без прав от работы без глав различает код ответа /parts."""
+    # 200 у _get требует блок профиля
+    page = (FIXTURES / "index_old_account_raw.html").read_text(encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/home/myfics/1001/parts"
+        return httpx.Response(status, text=page)
+
+    assert asyncio.run(mock_api(handler).is_readonly("1001")) is readonly
+
+
+def test_is_readonly_keeps_other_errors():
+    """Не 404 на /parts - не readonly, а ошибка: иначе 429 спрятал бы главы."""
+    with pytest.raises(SiteError) as e:
+        asyncio.run(mock_api(lambda _: httpx.Response(429)).is_readonly("1001"))
+    assert e.value.status == 429
+
+
+def test_coauthor_list_without_chapters():
+    """Карточки без прав и без глав обе приходят без глав и без запросов /parts."""
+    html = (FIXTURES / "assistant_fanfics-coauthor_raw.html").read_text(
+        encoding="utf-8"
+    )
+    fics = asyncio.run(
+        mock_api(lambda _: httpx.Response(200, text=html)).get_fics("coauthor")
+    )
+    assert [(f.id, f.chapters) for f in fics] == [("1002", []), ("1001", [])]
+
+
+def test_rate_limit_window(monkeypatch):
+    """Не больше RATE_LIMIT запросов за RATE_WINDOW, и при параллельных вызовах."""
+    monkeypatch.setattr(FicbookAPI, "RATE_LIMIT", 2)
+    monkeypatch.setattr(FicbookAPI, "RATE_WINDOW", 0.3)
+    starts: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        starts.append(time.monotonic())
+        return httpx.Response(200, text=BETA_PAGE)
+
+    async def five_parallel():
+        api = mock_api(handler)
+        await asyncio.gather(*(api.get_fics("beta") for _ in range(5)))
+
+    asyncio.run(five_parallel())
+    assert len(starts) == 5
+    # первые два сразу, дальше каждый ждёт, пока из окна выйдет запрос на 2 раньше
+    assert starts[1] - starts[0] < 0.1
+    assert all(b - a >= 0.29 for a, b in zip(starts, starts[2:], strict=False))

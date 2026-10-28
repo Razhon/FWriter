@@ -81,19 +81,24 @@ class ClickableLabel(Label, can_focus=True):
 
 
 class ChapterButton(ClickableLabel):
-    def __init__(self, fic: Fic, chapter: SlimChapterInfo, role: Role) -> None:
+    def __init__(
+        self, fic: Fic, chapter: SlimChapterInfo, role: Role, mark: str = ""
+    ) -> None:
         self.fic = fic
         self.chapter = chapter
         self.role: Role = role
-        super().__init__(chapter.title, classes="chapter_btn")
+        super().__init__(chapter.title + mark, classes="chapter_btn")
 
 
-def fic_collapsible(fic: Fic, role: Role) -> Collapsible:
+def fic_collapsible(
+    fic: Fic, role: Role, gone: list[SlimChapterInfo] | None = None
+) -> Collapsible:
+    """gone - главы с черновиком, которых нет на сайте: правятся, F5 создаёт заново."""
     chapters: list[ClickableLabel] = [
         ChapterButton(fic, ch, role) for ch in fic.chapters
     ]
-    # TODO readonly: признак выключенного автором редактирования пока не найден
-    if can_manage(role, readonly=False):
+    chapters += [ChapterButton(fic, ch, role, " (нет на сайте)") for ch in gone or []]
+    if can_manage(role, fic.readonly):
         chapters.append(
             ClickableLabel(
                 "[bold]Новая глава ->[/]",
@@ -119,8 +124,11 @@ class StartPageTab(TabPane):
             self.role = role
             super().__init__()
 
-    def __init__(self, api: FicbookAPI) -> None:
+    def __init__(self, api: FicbookAPI, storage: ChapterStorage) -> None:
         self.api = api
+        self.storage = storage
+        # одно уведомление на загрузку, а не на каждый fic.json
+        self.write_failed = False
         super().__init__("Начало работы", id="start_page")
 
     def compose(self) -> ComposeResult:
@@ -145,7 +153,9 @@ class StartPageTab(TabPane):
                 return
         fics_container = self.query_one(".fics_container", VerticalScroll)
 
-        # цикл намеренный, пока не уверен как Cloudflare отнесётся к такой ораве запросов
+        seen: set[str] = set()
+        # без какого-то списка не понять, какие работы пропали с сайта
+        all_loaded = True
         for role, label in FIC_SECTIONS:
             try:
                 fics = await self.api.get_fics(role)
@@ -153,17 +163,117 @@ class StartPageTab(TabPane):
                 report_api_error(self, e, f"Не удалось загрузить список «{label}»")
                 if isinstance(e, STOP_LOADING):
                     return
+                all_loaded = False
                 continue
+            seen.update(fic.id for fic in fics)
             if not fics:
                 continue
+            collapsibles: list[Collapsible] = []
+            for fic in fics:
+                broken = False
+                # есть главы в карточке - есть право; без глав различает только /parts
+                if not fic.chapters:
+                    stored, broken = self.stored_fic(fic.id)
+                    try:
+                        fic.readonly = await self.api.is_readonly(fic.id)
+                    except FicbookAPIError as e:
+                        # раздел не прячем: работа из fic.json, без него - без прав
+                        report_api_error(
+                            self, e, f"Не удалось проверить права на «{fic.title}»"
+                        )
+                        if isinstance(e, STOP_LOADING):
+                            return
+                        fic.readonly = stored.readonly if stored else True
+                        fic.chapters = stored.chapters if stored else []
+                        collapsibles.append(fic_collapsible(fic, role))
+                        continue
+                    # сайт не отдаёт главы работы без прав: остаётся последний список
+                    if fic.readonly and stored:
+                        fic.chapters = stored.chapters
+                # битый fic.json - единственный след списка глав работы без прав
+                if fic.readonly and broken:
+                    self.notify(
+                        f"Файл работы «{fic.title}» повреждён, список глав не показан",
+                        severity="error",
+                        markup=False,
+                    )
+                else:
+                    self.save_fic(fic, role)
+                # без прав список глав не с сайта: удалённые не определить
+                gone = [] if fic.readonly else self.gone_chapters(fic)
+                collapsibles.append(fic_collapsible(fic, role, gone))
 
             if fics_container.children:  # разделитель
                 await fics_container.mount(Rule())
 
             await fics_container.mount(
                 Label(f"{label}:", classes="fics_collapsibles_label"),
-                *[fic_collapsible(fic, role) for fic in fics],
+                *collapsibles,
             )
+
+        if all_loaded:
+            await self.show_gone(seen)
+
+    async def show_gone(self, seen: set[str]) -> None:
+        """Работы из fic.json, которых нет ни в одном списке сайта: черновики остаются."""
+        # повреждённые fic.json покажет офлайн-режим, здесь не до них
+        stored, _ = self.storage.read_fics()
+        gone: list[Collapsible] = []
+        for fic, role in stored:
+            if fic.id in seen:
+                continue
+            # без черновика главу уже не скачать; название - из fic.json
+            known = {ch.id: ch for ch in fic.chapters}
+            chapters = [
+                known.get(ch.id, ch) for ch in self.storage.local_chapters(fic.id)
+            ]
+            if chapters:
+                # readonly: отправлять некуда
+                gone.append(
+                    fic_collapsible(Fic(fic.id, fic.title, chapters, True), role)
+                )
+        if not gone:
+            return
+        fics_container = self.query_one(".fics_container", VerticalScroll)
+        if fics_container.children:
+            await fics_container.mount(Rule())
+        await fics_container.mount(
+            Label(
+                "Нет на сайте (работа удалена или у вас больше нет к ней доступа), "
+                "локальные черновики только для чтения:",
+                classes="fics_collapsibles_label",
+            ),
+            *gone,
+        )
+
+    def gone_chapters(self, fic: Fic) -> list[SlimChapterInfo]:
+        """Черновики глав, которых нет в списке с сайта: удалены на сайте."""
+        on_site = {ch.id for ch in fic.chapters}
+        return [
+            ch for ch in self.storage.local_chapters(fic.id) if ch.id not in on_site
+        ]
+
+    def stored_fic(self, fic_id: str) -> tuple[Fic | None, bool]:
+        """Работа из fic.json и признак, что файл есть, но не читается."""
+        try:
+            return self.storage.read_fic(fic_id)[0], False
+        except FileNotFoundError:
+            return None, False
+        except OSError, ValueError:
+            log.warning("fic.json %s не прочитан", fic_id, exc_info=True)
+            return None, True
+
+    def save_fic(self, fic: Fic, role: Role) -> None:
+        try:
+            self.storage.write_fic(fic, role)
+        except OSError:
+            log.warning("fic.json %s не записан", fic.id, exc_info=True)
+            if not self.write_failed:
+                self.write_failed = True
+                self.notify(
+                    "Не удалось сохранить список работ на диск, офлайн он будет неполным",
+                    severity="error",
+                )
 
     @on(ClickableLabel.Pressed, ".chapter_btn")
     def on_chapter_pressed(self, event: ClickableLabel.Pressed) -> None:
@@ -190,7 +300,7 @@ class MainScreen(Screen):
 
     def compose(self) -> ComposeResult:
         with TabbedContent():
-            yield StartPageTab(self.api)
+            yield StartPageTab(self.api, self.storage)
 
     # стартовая вкладка не закрывается, она же выбор глав
     def action_start_page(self) -> None:
@@ -273,8 +383,8 @@ class MainScreen(Screen):
                 text,
                 meta,
                 title,
-                # TODO readonly, как и у "Новой главы"
-                title_editable=can_manage(role, readonly=False),
+                title_editable=can_manage(role, fic.readonly),
+                readonly=fic.readonly,
             )
         )
         show()

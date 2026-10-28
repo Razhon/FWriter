@@ -25,6 +25,7 @@ class ChapterTab(TabPane):
         meta: ChapterMeta | None,
         title: str,
         title_editable: bool,
+        readonly: bool = False,
     ) -> None:
         """meta None: chapter.json повреждён, название не сохраняется, чтобы не затереть его."""
         self.storage = storage
@@ -34,7 +35,7 @@ class ChapterTab(TabPane):
         self.save_timer: Timer | None = None
         # ссылки, а не query_one: в on_unmount дочерние виджеты уже сняты
         self.title_input = Input(title, disabled=not title_editable)
-        self.editor = TextArea(text)
+        self.editor = TextArea(text, read_only=readonly)
         # TextArea приводит переводы строк к одному виду (и \u2028, \x0c - к \n):
         # без правок такой текст не перезаписываем, при правке предупреждаем
         self.saved_text = self.editor.text

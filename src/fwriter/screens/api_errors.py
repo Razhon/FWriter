@@ -33,7 +33,7 @@ def report_api_error(widget: Widget, e: FicbookAPIError, action: str) -> None:
         case UserNotLoggedInError():
             widget.post_message(SessionExpired(str(e)))
         # временная: повторит сам человек
-        case NetworkError():
+        case NetworkError() | SiteError(temporary=True):
             widget.notify(text, severity="warning")
         case SiteError():
             widget.notify(text, severity="error")

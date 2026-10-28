@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+import pytest
 from textual.app import App
 from textual.widgets import Collapsible, Input, Label, Log, TabbedContent
 from textual.widgets._collapsible import CollapsibleTitle
@@ -19,8 +20,19 @@ from fwriter.run import FWriterApp, setup_logging
 from fwriter.screens import ErrorScreen, LoginScreen, MainScreen, SessionExpired
 from fwriter.screens.api_errors import report_api_error
 from fwriter.screens.chapter import ChapterTab
-from fwriter.screens.main import FIC_SECTIONS
+from fwriter.screens.main import FIC_SECTIONS, ChapterButton
 from fwriter.secrets import SecretStorage
+
+
+@pytest.fixture(autouse=True)
+def offline_api(tmp_path, monkeypatch):
+    """MainScreen без storage не пишет в DATA_DIR, проверка прав не ходит на сайт."""
+    monkeypatch.setattr("fwriter.screens.main.DATA_DIR", tmp_path)
+
+    async def not_readonly(self, fic_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(FicbookAPI, "is_readonly", not_readonly)
 
 
 def test_titles_are_plain_text():
@@ -208,9 +220,13 @@ def test_new_chapter_only_for_managers():
     api.user = UserInfo("1", "Кот")
 
     async def fake_get_fics(role: str) -> list[Fic]:
-        return [Fic("1", role, [])]
+        return [Fic("1", role, []), Fic("2", f"{role} ro", [])]
+
+    async def fake_is_readonly(fic_id: str) -> bool:
+        return fic_id == "2"
 
     api.get_fics = fake_get_fics
+    api.is_readonly = fake_is_readonly
     main = MainScreen(api)
 
     class TestApp(App):
@@ -265,6 +281,111 @@ def test_expired_session_opens_login(monkeypatch):
 
 
 FIC = Fic("00000000", "Фанфик", [SlimChapterInfo("00000000", "Глава")])
+
+
+def chapter_titles(main: MainScreen) -> list[str]:
+    return [str(b.render()) for b in main.query(".chapter_btn")]
+
+
+def test_readonly_fic_keeps_known_chapters(tmp_path):
+    """Сайт не отдаёт главы работы без прав: в fic.json и на экране остаётся прошлый список."""
+    api = api_without_fics()
+    readonly = False
+
+    async def fake_get_fics(role: str) -> list[Fic]:
+        if role != "coauthor":
+            return []
+        chapters = [] if readonly else list(FIC.chapters)
+        return [Fic(FIC.id, FIC.title, chapters)]
+
+    async def fake_is_readonly(fic_id: str) -> bool:
+        return readonly
+
+    api.get_fics = fake_get_fics
+    api.is_readonly = fake_is_readonly
+    storage = ChapterStorage(tmp_path)
+
+    async def load() -> list[str]:
+        main = MainScreen(api, storage)
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            return chapter_titles(main)
+
+    assert asyncio.run(load()) == ["Глава"]
+    readonly = True
+    assert asyncio.run(load()) == ["Глава"]
+    assert storage.read_fic(FIC.id) == (
+        Fic(FIC.id, FIC.title, FIC.chapters, readonly=True),
+        "coauthor",
+    )
+
+
+def test_readonly_fic_keeps_broken_fic_json(tmp_path):
+    """Битый fic.json работы без прав не затирается пустым списком глав."""
+    api = api_without_fics()
+
+    async def fake_get_fics(role: str) -> list[Fic]:
+        return [Fic(FIC.id, FIC.title, [])] if role == "coauthor" else []
+
+    async def fake_is_readonly(fic_id: str) -> bool:
+        return True
+
+    api.get_fics = fake_get_fics
+    api.is_readonly = fake_is_readonly
+    path = tmp_path / "fics" / FIC.id / "fic.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{", encoding="utf-8")
+    main = MainScreen(api, ChapterStorage(tmp_path))
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            notes = [n.severity for n in pilot.app._notifications]
+            assert notes == ["error"]
+
+    asyncio.run(run())
+    assert path.read_text(encoding="utf-8") == "{"
+
+
+def test_readonly_check_failure_keeps_section(tmp_path):
+    """Сбой проверки прав одной работы: раздел виден, работа - по fic.json."""
+    api = api_without_fics()
+    storage = ChapterStorage(tmp_path)
+    storage.write_fic(Fic("2", "Старая", FIC.chapters, readonly=True), "coauthor")
+
+    async def fake_get_fics(role: str) -> list[Fic]:
+        if role != "coauthor":
+            return []
+        return [Fic("1", "Пустая", []), Fic("2", "Старая", []), FIC]
+
+    async def limited(fic_id: str) -> bool:
+        raise SiteError(429)
+
+    api.get_fics = fake_get_fics
+    api.is_readonly = limited
+    main = MainScreen(api, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            assert [str(c.title) for c in main.query(Collapsible)] == [
+                "Пустая",
+                "Старая",
+                FIC.title,
+            ]
+            # без fic.json - без прав, пока не проверим
+            assert [
+                str(c.title)
+                for c in main.query(Collapsible)
+                if c.query(".new_chapter_btn")
+            ] == [FIC.title]
+            assert chapter_titles(main) == ["Глава", "Глава"]
+            # непроверенные работы на диск не пишутся
+            fics, _ = storage.read_fics()
+            assert [f.id for f, _ in fics] == [FIC.id, "2"]
+
+    asyncio.run(run())
 
 
 def api_without_fics() -> FicbookAPI:
@@ -367,6 +488,24 @@ def test_chapter_tab_saves_draft(tmp_path, monkeypatch):
             await pilot.press("2")
         assert fetched == ["00000000"]
         assert draft() == "Текст.!?12"
+
+    asyncio.run(run())
+
+
+def test_readonly_chapter_is_locked(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft("00000000", "00000000", "Текст.")
+    main = MainScreen(api_without_fics(), storage)
+    fic = Fic(FIC.id, FIC.title, FIC.chapters, readonly=True)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            main.open_chapter(fic, fic.chapters[0], "coauthor")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            tab = main.query_one(ChapterTab)
+            assert tab.editor.read_only
+            assert tab.title_input.disabled
 
     asyncio.run(run())
 
@@ -617,12 +756,16 @@ def test_report_api_error():
         async with TestApp().run_test() as pilot:
             app = pilot.app
             report_api_error(app.screen, NetworkError("Нет связи с сайтом"), "Не вышло")
-            report_api_error(app.screen, SiteError(503), "Не вышло")
+            # 429 и 5xx пройдут сами, как и сбой сети
+            for status in (503, 429, 404):
+                report_api_error(app.screen, SiteError(status), "Не вышло")
             await pilot.pause()
             notes = [(n.message, n.severity) for n in app._notifications]
             assert notes == [
                 ("Не вышло\nНет связи с сайтом", "warning"),
-                ("Не вышло\nСайт ответил ошибкой 503", "error"),
+                ("Не вышло\nСайт временно не работает (ошибка 503)", "warning"),
+                (f"Не вышло\n{SiteError.TEXTS[429]}", "warning"),
+                (f"Не вышло\n{SiteError.TEXTS[404]}", "error"),
             ]
 
             report_api_error(app.screen, UserNotLoggedInError("Сессия истекла"), "-")
@@ -639,5 +782,87 @@ def test_report_api_error():
             await pilot.pause()
             assert len(app.screen_stack) == 2
             assert app.screen.lines == ["Не вышло\nНет блока", "Не вышло\nНет другого"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("beta_fails", [False, True])
+def test_gone_fics_marked(tmp_path, beta_fails: bool):
+    """Работа из fic.json, которой нет на сайте, - в отдельном разделе, только чтение.
+
+    В разделе только главы с черновиком: остальные с сайта уже не скачать.
+    Если какой-то список не загрузился, пропавшие не определить: раздела нет.
+    """
+    api = api_without_fics()
+    storage = ChapterStorage(tmp_path)
+    storage.write_fic(FIC, "author")
+    two_chapters = [SlimChapterInfo("1", "С черновиком"), SlimChapterInfo("2", "Без")]
+    storage.write_fic(Fic("2", "Удалённая", two_chapters), "author")
+    storage.write_draft("2", "1", "Текст.")
+    storage.write_fic(Fic("3", "Без черновиков", two_chapters), "author")
+
+    async def fake_get_fics(role: str) -> list[Fic]:
+        if role == "beta" and beta_fails:
+            raise SiteError(500)
+        return [FIC] if role == "author" else []
+
+    api.get_fics = fake_get_fics
+    main = MainScreen(api, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            titles = [str(c.title) for c in main.query(Collapsible)]
+            labels = [str(lb.render()) for lb in main.query(".fics_collapsibles_label")]
+            if beta_fails:
+                assert titles == [FIC.title]
+                return
+            assert titles == [FIC.title, "Удалённая"]
+            assert labels[-1].startswith("Нет на сайте")
+            gone = main.query(Collapsible).last()
+            assert not gone.query(".new_chapter_btn")
+            assert [str(b.render()) for b in gone.query(".chapter_btn")] == [
+                "С черновиком"
+            ]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("readonly", [False, True])
+def test_chapter_gone_from_site_marked(tmp_path, readonly: bool):
+    """Черновик главы, которой нет в списке с сайта, - с пометкой и правится.
+
+    У работы без прав список глав не с сайта: пометки нет.
+    """
+    api = api_without_fics()
+    storage = ChapterStorage(tmp_path)
+    storage.write_fic(Fic(FIC.id, FIC.title, FIC.chapters, readonly), "coauthor")
+    storage.write_draft(FIC.id, "1", "Удалённая.")
+    storage.set_title(FIC.id, "1", "Удалённая")
+
+    async def fake_get_fics(role: str) -> list[Fic]:
+        return [Fic(FIC.id, FIC.title, [])] if role == "coauthor" else []
+
+    async def fake_is_readonly(fic_id: str) -> bool:
+        return readonly
+
+    api.get_fics = fake_get_fics
+    api.is_readonly = fake_is_readonly
+    main = MainScreen(api, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            if readonly:
+                assert chapter_titles(main) == ["Глава"]
+                return
+            assert chapter_titles(main) == ["Удалённая (нет на сайте)"]
+            btn = main.query_one(ChapterButton)
+            main.open_chapter(btn.fic, btn.chapter, btn.role)
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            tab = main.query_one(ChapterTab)
+            assert tab.editor.text == "Удалённая."
+            assert not tab.editor.read_only
 
     asyncio.run(run())

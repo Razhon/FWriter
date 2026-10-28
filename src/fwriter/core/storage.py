@@ -110,26 +110,29 @@ class ChapterStorage:
     def _chapter(self, fic_id: str, chapter_id: str) -> Path:
         return self.fics / fic_id / chapter_id
 
-    def write_fic(self, fic: Fic, role: Role, readonly: bool) -> None:
+    def write_fic(self, fic: Fic, role: Role) -> None:
         _write(
             self.fics / fic.id / "fic.json",
             _dump(
                 {
                     "title": fic.title,
                     "role": role,
-                    "readonly": readonly,
+                    "readonly": fic.readonly,
                     "chapters": [asdict(ch) for ch in fic.chapters],
                 }
             ),
         )
 
-    def read_fics(self) -> tuple[list[tuple[Fic, Role, bool]], list[str]]:
-        """Фанфики из fic.json для офлайн-режима: [(фанфик, роль, readonly)] и ошибки.
+    def read_fic(self, fic_id: str) -> tuple[Fic, Role]:
+        return self._read_fic(self.fics / fic_id / "fic.json")
+
+    def read_fics(self) -> tuple[list[tuple[Fic, Role]], list[str]]:
+        """Фанфики из fic.json для офлайн-режима: [(фанфик, роль)] и ошибки.
 
         Повреждённый fic.json пропускается, чтобы не прятать остальные фанфики;
         его ошибку показывает UI.
         """
-        fics: list[tuple[Fic, Role, bool]] = []
+        fics: list[tuple[Fic, Role]] = []
         errors: list[str] = []
         for path in sorted(self.fics.glob("*/fic.json")):
             try:
@@ -139,7 +142,7 @@ class ChapterStorage:
         return fics, errors
 
     @staticmethod
-    def _read_fic(path: Path) -> tuple[Fic, Role, bool]:
+    def _read_fic(path: Path) -> tuple[Fic, Role]:
         try:
             data = json.loads(_read(path))
             role, readonly = data["role"], data["readonly"]
@@ -147,7 +150,7 @@ class ChapterStorage:
             if role not in get_args(Role) or not isinstance(readonly, bool):
                 raise ValueError(f"роль {role!r}, readonly {readonly!r}")
             chapters = [SlimChapterInfo(**ch) for ch in data["chapters"]]
-            return Fic(path.parent.name, data["title"], chapters), role, readonly
+            return Fic(path.parent.name, data["title"], chapters, readonly), role
         except (ValueError, TypeError, KeyError) as e:
             raise ValueError(f"Файл {path} повреждён") from e
 
@@ -262,16 +265,26 @@ class ChapterStorage:
             for p in (self.fics / fic_id).glob("new-*/draft.txt")
             if p.parent.name[4:].isdecimal()
         ]
-        chapters: list[SlimChapterInfo] = []
         # по номеру: new-10 после new-2
-        for path in sorted(paths, key=lambda p: int(p.parent.name[4:])):
-            chapter_id = path.parent.name
-            try:
-                title = self.read_chapter(fic_id, chapter_id).title
-            except OSError, ValueError:
-                title = chapter_id
-            chapters.append(SlimChapterInfo(chapter_id, title))
-        return chapters
+        paths.sort(key=lambda p: int(p.parent.name[4:]))
+        return [self._slim(fic_id, p.parent.name) for p in paths]
+
+    def local_chapters(self, fic_id: str) -> list[SlimChapterInfo]:
+        """Главы с сайта, у которых есть черновик; название - как у new_chapters."""
+        paths = [
+            p
+            for p in (self.fics / fic_id).glob("*/draft.txt")
+            if p.parent.name.isdecimal()
+        ]
+        paths.sort(key=lambda p: int(p.parent.name))
+        return [self._slim(fic_id, p.parent.name) for p in paths]
+
+    def _slim(self, fic_id: str, chapter_id: str) -> SlimChapterInfo:
+        try:
+            title = self.read_chapter(fic_id, chapter_id).title
+        except OSError, ValueError:
+            title = chapter_id
+        return SlimChapterInfo(chapter_id, title)
 
     def rename_chapter(self, fic_id: str, old_id: str, new_id: str, title: str) -> None:
         """new-N -> id с сайта после создания главы; глава дописывается в fic.json.
@@ -288,9 +301,9 @@ class ChapterStorage:
         # до записи fic.json: rename на занятую папку ведёт себя по-разному в разных ОС
         if new.exists():
             raise FileExistsError(f"Папка {new} уже существует")
-        fic, role, readonly = self._read_fic(self.fics / fic_id / "fic.json")
+        fic, role = self._read_fic(self.fics / fic_id / "fic.json")
         # глава уже есть, если список успели обновить с сайта
         if all(ch.id != new_id for ch in fic.chapters):
             fic.chapters.append(SlimChapterInfo(new_id, title))
-        self.write_fic(fic, role, readonly)
+        self.write_fic(fic, role)
         self._chapter(fic_id, old_id).rename(new)

@@ -1,3 +1,6 @@
+from typing import ClassVar
+
+
 class FicbookAPIError(Exception):
     pass
 
@@ -21,6 +24,24 @@ class NetworkError(FicbookAPIError):
 class SiteError(FicbookAPIError):
     """Сайт ответил кодом ошибки."""
 
+    # общие: что именно не вышло, говорит action в report_api_error
+    TEXTS: ClassVar[dict[int, str]] = {
+        403: "Нет доступа: у вас нет прав на это действие",
+        404: "Сайт не нашёл страницу: её удалили или у вас нет прав на это действие",
+        429: "Сайт ограничил частоту запросов, повторите через полминуты",
+    }
+
     def __init__(self, status: int) -> None:
         self.status = status
-        super().__init__(f"Сайт ответил ошибкой {status}")
+        if status in self.TEXTS:
+            text = self.TEXTS[status]
+        elif self.temporary:
+            text = f"Сайт временно не работает (ошибка {status})"
+        else:
+            text = f"Сайт ответил ошибкой {status}"
+        super().__init__(text)
+
+    @property
+    def temporary(self) -> bool:
+        """Пройдёт само: лимит запросов или сбой сервера."""
+        return self.status == 429 or self.status >= 500

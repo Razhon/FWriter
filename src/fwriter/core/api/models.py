@@ -28,6 +28,8 @@ class Fic:
     id: str
     title: str
     chapters: list[SlimChapterInfo]
+    # автор выключил помощнику редактирование: сайт не отдаёт главы
+    readonly: bool = False
 
 
 @dataclass

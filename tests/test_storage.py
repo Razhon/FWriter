@@ -33,7 +33,7 @@ def test_version_adds_record(tmp_path):
 
 def test_new_chapter_renamed(tmp_path):
     storage = ChapterStorage(tmp_path)
-    storage.write_fic(Fic("1", "Фик", []), "author", readonly=False)
+    storage.write_fic(Fic("1", "Фик", []), "author")
     assert storage.new_chapter_id("1") == "new-1"
     assert storage.new_chapter_id("1") == "new-2"
     storage.write_draft("1", "new-1", "текст")
@@ -43,7 +43,7 @@ def test_new_chapter_renamed(tmp_path):
     assert storage.read_draft("1", "500") == "текст"
     assert storage.read_draft("1", "new-1") is None
     assert storage.new_chapter_id("1") == "new-1"
-    [(fic, _, _)], _ = storage.read_fics()
+    [(fic, _)], _ = storage.read_fics()
     assert fic.chapters == [SlimChapterInfo("500", "Новая")]
 
 
@@ -51,13 +51,11 @@ def test_rename_after_site_refresh_no_duplicate(tmp_path):
     storage = ChapterStorage(tmp_path)
     storage.new_chapter_id("1")
     storage.write_draft("1", "new-1", "текст")
-    storage.write_fic(
-        Fic("1", "Фик", [SlimChapterInfo("500", "Новая")]), "author", readonly=False
-    )
+    storage.write_fic(Fic("1", "Фик", [SlimChapterInfo("500", "Новая")]), "author")
 
     storage.rename_chapter("1", "new-1", "500", "Новая")
 
-    [(fic, _, _)], _ = storage.read_fics()
+    [(fic, _)], _ = storage.read_fics()
     assert fic.chapters == [SlimChapterInfo("500", "Новая")]
     assert storage.read_draft("1", "500") == "текст"
 
@@ -75,7 +73,7 @@ def test_rename_after_site_refresh_no_duplicate(tmp_path):
 )
 def test_rename_failure_keeps_new_chapter(tmp_path, monkeypatch, broken: str | None):
     storage = ChapterStorage(tmp_path)
-    storage.write_fic(Fic("1", "Фик", []), "author", readonly=False)
+    storage.write_fic(Fic("1", "Фик", []), "author")
     storage.new_chapter_id("1")
     storage.write_draft("1", "new-1", "текст")
     if broken is None:  # fic.json цел, но запись не удалась
@@ -96,7 +94,7 @@ def test_rename_failure_keeps_new_chapter(tmp_path, monkeypatch, broken: str | N
 
 def test_rename_to_existing_folder_changes_nothing(tmp_path):
     storage = ChapterStorage(tmp_path)
-    storage.write_fic(Fic("1", "Фик", []), "author", readonly=False)
+    storage.write_fic(Fic("1", "Фик", []), "author")
     storage.new_chapter_id("1")
     storage.write_draft("1", "new-1", "текст")
     storage.write_draft("1", "500", "с сайта")
@@ -104,7 +102,7 @@ def test_rename_to_existing_folder_changes_nothing(tmp_path):
     with pytest.raises(FileExistsError):
         storage.rename_chapter("1", "new-1", "500", "Новая")
 
-    [(fic, _, _)], _ = storage.read_fics()
+    [(fic, _)], _ = storage.read_fics()
     assert fic.chapters == []
     assert storage.read_draft("1", "500") == "с сайта"
     assert storage.read_draft("1", "new-1") == "текст"
@@ -112,7 +110,7 @@ def test_rename_to_existing_folder_changes_nothing(tmp_path):
 
 def test_rename_folder_failure_keeps_text(tmp_path, monkeypatch):
     storage = ChapterStorage(tmp_path)
-    storage.write_fic(Fic("1", "Фик", []), "author", readonly=False)
+    storage.write_fic(Fic("1", "Фик", []), "author")
     storage.new_chapter_id("1")
     storage.write_draft("1", "new-1", "текст")
 
@@ -124,7 +122,7 @@ def test_rename_folder_failure_keeps_text(tmp_path, monkeypatch):
         storage.rename_chapter("1", "new-1", "500", "Новая")
 
     # глава в fic.json без локальной копии, текст - в new-1
-    [(fic, _, _)], _ = storage.read_fics()
+    [(fic, _)], _ = storage.read_fics()
     assert fic.chapters == [SlimChapterInfo("500", "Новая")]
     assert storage.read_draft("1", "500") is None
     assert storage.new_chapters("1") == [SlimChapterInfo("new-1", "new-1")]
@@ -133,7 +131,7 @@ def test_rename_folder_failure_keeps_text(tmp_path, monkeypatch):
 
 def test_new_chapters_survive_restart(tmp_path):
     storage = ChapterStorage(tmp_path)
-    storage.write_fic(Fic("1", "Фик", []), "author", readonly=False)
+    storage.write_fic(Fic("1", "Фик", []), "author")
     ids = [storage.new_chapter_id("1") for _ in range(10)]
     storage.write_draft("1", ids[9], "десятая")
     storage.write_draft("1", ids[1], "вторая")
@@ -164,12 +162,12 @@ def test_broken_chapter_json_keeps_texts(tmp_path, broken: str):
 
 def test_fics_roundtrip(tmp_path):
     storage = ChapterStorage(tmp_path)
-    fic = Fic("7", "Фик", [SlimChapterInfo("70", "Глава 1")])
-    storage.write_fic(fic, "beta", readonly=True)
-    storage.write_fic(Fic("8", "Другой", []), "author", readonly=False)
+    fic = Fic("7", "Фик", [SlimChapterInfo("70", "Глава 1")], readonly=True)
+    storage.write_fic(fic, "beta")
+    storage.write_fic(Fic("8", "Другой", []), "author")
 
     assert storage.read_fics() == (
-        [(fic, "beta", True), (Fic("8", "Другой", []), "author", False)],
+        [(fic, "beta"), (Fic("8", "Другой", []), "author")],
         [],
     )
 
@@ -186,13 +184,13 @@ def test_fics_roundtrip(tmp_path):
 def test_broken_fic_json_skipped(tmp_path, broken: str):
     storage = ChapterStorage(tmp_path)
     fic = Fic("7", "Фик", [])
-    storage.write_fic(fic, "author", readonly=False)
+    storage.write_fic(fic, "author")
     (tmp_path / "fics" / "8").mkdir()
     (tmp_path / "fics" / "8" / "fic.json").write_text(broken)
 
     fics, errors = storage.read_fics()
 
-    assert fics == [(fic, "author", False)]
+    assert fics == [(fic, "author")]
     assert errors == [f"Файл {tmp_path / 'fics' / '8' / 'fic.json'} повреждён"]
 
 
@@ -241,3 +239,18 @@ def test_lock_data_dir_once(tmp_path):
         lock_data_dir(tmp_path)
     # после закрытия файла блокировка свободна
     lock_data_dir(tmp_path).close()
+
+
+def test_local_chapters(tmp_path):
+    """Главы с сайта с черновиком, по номеру; new-N и папки без текста не входят."""
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft("1", "10", "десятая")
+    storage.write_draft("1", "9", "девятая")
+    storage.set_title("1", "9", "Девятая")
+    storage.write_draft("1", "new-1", "новая")
+    (tmp_path / "fics" / "1" / "11").mkdir()
+
+    assert storage.local_chapters("1") == [
+        SlimChapterInfo("9", "Девятая"),
+        SlimChapterInfo("10", "10"),
+    ]
