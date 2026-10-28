@@ -439,3 +439,78 @@ def test_post_form_answers(answer, error: type[Exception], text: str):
 def test_post_form_not_json():
     with pytest.raises(APIChangedError, match="не JSON"):
         save(chapter_page("author_draft"), httpx.Response(200, text="<html>"))
+
+
+def create(answer: httpx.Response, html: str | None = None) -> tuple[str, list]:
+    """create_chapter на фикстуре addpart; возвращает id и отправленные поля."""
+    if html is None:
+        html = (FIXTURES / "myfics-00000000-addpart.html").read_text(encoding="utf-8")
+    sent: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert request.url.path == "/home/myfics/1/addpart"
+            return httpx.Response(200, text=html)
+        sent.extend(parse_qsl(request.content.decode(), keep_blank_values=True))
+        sent.insert(0, ("<url>", request.url.path))
+        return answer
+
+    chapter_id = asyncio.run(mock_api(handler).create_chapter("1", "Т", TEXT))
+    return chapter_id, sent
+
+
+def test_create_chapter():
+    # формат redirect проверен на сайте 28.10.2026
+    answer = {"result": True, "data": {"redirect": "/home/myfics/1/parts/2002"}}
+    chapter_id, sent = create(httpx.Response(200, json=answer))
+
+    assert chapter_id == "2002"
+    fields = dict(sent)
+    assert fields["<url>"] == "/home/fanfics/partadd_save"
+    assert fields["title"] == "Т"
+    assert fields["insert_after"] == "3"  # значение common-select по умолчанию
+    assert fields["param"] == "1"
+    assert fields["content"] == TEXT
+
+
+def test_create_chapter_sends_draft_status():
+    html = (FIXTURES / "myfics-00000000-addpart.html").read_text(encoding="utf-8")
+    html = html.replace(
+        '<input checked="" name="param" type="radio" value="1"/>',
+        '<input name="param" type="radio" value="1"/>',
+        1,
+    )
+    html = html.replace(
+        '<input name="param" type="radio" value="2"/>',
+        '<input checked="" name="param" type="radio" value="2"/>',
+        1,
+    )
+    answer = {"result": True, "data": {"redirect": "/home/myfics/1/parts/2002"}}
+    _, sent = create(httpx.Response(200, json=answer), html)
+    assert [value for name, value in sent if name == "param"] == ["1"]
+
+
+def test_create_chapter_redirect_without_id():
+    answer = {"result": True, "data": {"redirect": "/home/myfics/1/parts"}}
+    with pytest.raises(APIChangedError, match="id новой главы"):
+        create(httpx.Response(200, json=answer))
+
+
+@pytest.mark.parametrize("attr", ["", ":initial-value=\"'3'\""])
+def test_common_select_bad_value_raises(attr: str):
+    html = (FIXTURES / "myfics-00000000-addpart.html").read_text(encoding="utf-8")
+    html = html.replace(':initial-value="3"', attr, 1)
+    with pytest.raises(APIChangedError, match="insert_after"):
+        create(OK, html)
+
+
+@pytest.mark.parametrize("action", ["show_part", "hide_part", "disable_auto_pub"])
+def test_set_chapter_status(action):
+    sent: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append((request.url.path, request.content.decode()))
+        return httpx.Response(200, json={"result": True})
+
+    asyncio.run(mock_api(handler).set_chapter_status("2001", action))
+    assert sent == [(f"/home/myfics/{action}", "part_id=2001")]

@@ -4,7 +4,7 @@ import logging
 import re
 import time
 from collections import deque
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import httpx
 from bs4 import BeautifulSoup, Tag
@@ -246,12 +246,44 @@ class FicbookAPI:
         ]
         await self._post_form(url, [*fields, ("content", content)])
 
+    async def create_chapter(self, fic_id: str, title: str, content: str) -> str:
+        """Новая глава в конце работы; возвращает её id."""
+        response = await self._get(f"/home/myfics/{fic_id}/addpart")
+        soup = BeautifulSoup(response.text, "html.parser")
+        form = req(soup.find("form", id="savePartForm"), "форма новой главы")
+        url = str(req(form.get("action"), "адрес создания (action)"))
+        # черновик явно: отмеченный по умолчанию статус - решение сайта
+        overrides = {"title": title, "param": "1"}
+        fields = [
+            (name, overrides.get(name, value))
+            for name, value in self._form_fields(form)
+        ]
+        data = await self._post_form(url, [*fields, ("content", content)])
+        redirect = str(data.get("redirect", ""))
+        match = req(self._CHAPTER_RE.search(redirect), f"id новой главы ({redirect})")
+        return match.group(2)
+
+    async def set_chapter_status(
+        self,
+        chapter_id: str,
+        action: Literal["show_part", "hide_part", "disable_auto_pub"],
+    ) -> None:
+        """Опубликовать, скрыть в черновики или отменить отложенную публикацию."""
+        await self._post_form(f"/home/myfics/{action}", [("part_id", chapter_id)])
+
     @staticmethod
     def _form_fields(form) -> list[tuple[str, str]]:
         """Поля формы, как их отправит браузер."""
         fields = []
         for element in form.find_all(attrs={"name": True}):
             name = str(element["name"])
+            if element.name == "common-select":
+                value = str(req(element.get(":initial-value"), f"значение поля {name}"))
+                # это JS-выражение Vue: строка пришла бы в кавычках или переменной
+                if not value.isdecimal():
+                    raise APIChangedError(f"Нечисловое значение поля {name}: {value}")
+                fields.append((name, value))
+                continue
             if element.name not in ("input", "textarea"):
                 # не отправив select или Vue-компонент, сбросили бы настройку
                 raise APIChangedError(f"Неизвестное поле формы: {element.name} {name}")
