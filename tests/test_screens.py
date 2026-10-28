@@ -9,6 +9,7 @@ from textual.widgets._collapsible import CollapsibleTitle
 from fwriter.core.api.client import FicbookAPI
 from fwriter.core.api.errors import (
     APIChangedError,
+    FicbookAPIError,
     LoginFailedError,
     NetworkError,
     SiteError,
@@ -397,6 +398,18 @@ def api_without_fics() -> FicbookAPI:
 
     api.get_fics = no_fics
     return api
+
+
+def fake_logins(monkeypatch, results: list[FicbookAPIError | FicbookAPI]) -> None:
+    """FicbookAPI.login по очереди отдаёт results: ошибку выбрасывает."""
+
+    async def fake_login(cookies, user_agent):
+        result = results.pop(0)
+        if isinstance(result, FicbookAPIError):
+            raise result
+        return result
+
+    monkeypatch.setattr(FicbookAPI, "login", fake_login)
 
 
 class MainScreenApp(App):
@@ -800,6 +813,8 @@ def test_gone_fics_marked(tmp_path, beta_fails: bool):
     storage.write_fic(Fic("2", "Удалённая", two_chapters), "author")
     storage.write_draft("2", "1", "Текст.")
     storage.write_fic(Fic("3", "Без черновиков", two_chapters), "author")
+    storage.write_fic(Fic("4", "Только новая", []), "author")
+    storage.write_draft("4", storage.new_chapter_id("4"), "Новая.")
 
     async def fake_get_fics(role: str) -> list[Fic]:
         if role == "beta" and beta_fails:
@@ -817,12 +832,15 @@ def test_gone_fics_marked(tmp_path, beta_fails: bool):
             if beta_fails:
                 assert titles == [FIC.title]
                 return
-            assert titles == [FIC.title, "Удалённая"]
+            assert titles == [FIC.title, "Удалённая", "Только новая"]
             assert labels[-1].startswith("Нет на сайте")
-            gone = main.query(Collapsible).last()
+            *_, gone, only_new = main.query(Collapsible)
             assert not gone.query(".new_chapter_btn")
             assert [str(b.render()) for b in gone.query(".chapter_btn")] == [
                 "С черновиком"
+            ]
+            assert [str(b.render()) for b in only_new.query(".chapter_btn")] == [
+                "new-1 (не отправлена)"
             ]
 
     asyncio.run(run())
@@ -864,5 +882,188 @@ def test_chapter_gone_from_site_marked(tmp_path, readonly: bool):
             tab = main.query_one(ChapterTab)
             assert tab.editor.text == "Удалённая."
             assert not tab.editor.read_only
+
+    asyncio.run(run())
+
+
+def offline_storage(tmp_path) -> ChapterStorage:
+    """fic.json с прошлого входа: глава с черновиком, глава без него, new-1 и удалённая."""
+    storage = ChapterStorage(tmp_path)
+    fic = Fic(FIC.id, FIC.title, [*FIC.chapters, SlimChapterInfo("2", "Без копии")])
+    storage.write_fic(fic, "author")
+    storage.write_draft(FIC.id, FIC.chapters[0].id, "Текст.")
+    storage.write_draft(FIC.id, "1", "Удалённая.")
+    storage.write_draft(FIC.id, storage.new_chapter_id(FIC.id), "Новая.")
+    (tmp_path / "fics" / "8").mkdir()
+    (tmp_path / "fics" / "8" / "fic.json").write_text("{")
+    return storage
+
+
+def test_offline_start_page_from_fic_json(tmp_path):
+    main = MainScreen(None, offline_storage(tmp_path))
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert main.query(".relogin_btn")
+            assert chapter_titles(main) == [
+                "Глава",
+                "Без копии",
+                "1 (нет на сайте)",
+                "new-1 (не отправлена)",
+            ]
+            [note] = pilot.app._notifications
+            assert note.title == "Часть работ не показана"
+            assert "fics" in note.message and "8" in note.message
+
+            # без связи главу без локальной копии не скачать
+            buttons = list(main.query(ChapterButton))
+            main.open_chapter(buttons[1].fic, buttons[1].chapter, "author")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert not main.query(ChapterTab)
+            assert (
+                "локальной копии главы нет"
+                in list(pilot.app._notifications)[-1].message
+            )
+
+            main.open_chapter(buttons[0].fic, buttons[0].chapter, "author")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert main.query_one(ChapterTab).editor.text == "Текст."
+
+    asyncio.run(run())
+
+
+def test_new_chapters_shown_online(tmp_path):
+    api = api_without_fics()
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, storage.new_chapter_id(FIC.id), "Новая.")
+
+    async def fake_get_fics(role: str) -> list[Fic]:
+        return [FIC] if role == "author" else []
+
+    api.get_fics = fake_get_fics
+    main = MainScreen(api, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            assert chapter_titles(main) == ["Глава", "new-1 (не отправлена)"]
+
+    asyncio.run(run())
+
+
+def test_saved_login_without_network_goes_offline(tmp_path, monkeypatch):
+    monkeypatch.setattr(SecretStorage, "get_auth", lambda: ({"rme": "1"}, "ua"))
+    offline_storage(tmp_path)
+    online = api_without_fics()
+    fake_logins(
+        monkeypatch, [NetworkError("Нет связи с сайтом"), SiteError(503), online]
+    )
+
+    async def run():
+        app = FWriterApp()
+        async with app.run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            offline = app.main_screen
+            assert isinstance(pilot.app.screen, MainScreen)
+            assert offline and offline.api is None
+            first = next(iter(app._notifications))
+            assert (first.message, first.severity) == (
+                "Нет связи с сайтом. Работаем офлайн",
+                "warning",
+            )
+
+            # повтор снова без связи: тот же экран, вкладки не закрываются
+            await pilot.click(".relogin_btn")
+            await pilot.pause()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app.main_screen is offline
+            assert any(
+                n.message == "Сайт временно не работает (ошибка 503). Работаем офлайн"
+                for n in app._notifications
+            )
+
+            # правка офлайн не теряется при переходе в онлайн
+            offline.open_chapter(FIC, FIC.chapters[0], "author")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            tab = offline.query_one(ChapterTab)
+            tab.editor.move_cursor(tab.editor.document.end)
+            await pilot.press("!")
+            offline.action_start_page()
+            await pilot.pause(0.3)  # подсветка нажатия
+            await pilot.click(".relogin_btn")
+            await pilot.pause()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app.main_screen is not offline
+            assert app.main_screen and app.main_screen.api is online
+
+    asyncio.run(run())
+    assert ChapterStorage(tmp_path).read_draft(FIC.id, FIC.chapters[0].id) == "Текст.!"
+
+
+def test_relogin_keeps_offline_if_draft_not_saved(tmp_path, monkeypatch):
+    """Черновик не записан: офлайн-экран не снимается, иначе правки пропадут."""
+    monkeypatch.setattr(SecretStorage, "get_auth", lambda: ({"rme": "1"}, "ua"))
+    online = api_without_fics()
+    closed = False
+
+    async def close() -> None:
+        nonlocal closed
+        closed = True
+
+    online.close = close
+    fake_logins(monkeypatch, [NetworkError("Нет связи с сайтом"), online])
+
+    async def run():
+        app = FWriterApp()
+        async with app.run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            offline = app.main_screen
+            assert offline
+            monkeypatch.setattr(offline, "save_all", lambda notify=True: False)
+            await pilot.click(".relogin_btn")
+            await pilot.pause()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app.main_screen is offline
+            assert pilot.app.screen is offline
+            assert closed
+            assert list(app._notifications)[-1].message == (
+                "Не удалось записать черновик на диск, остаёмся офлайн"
+            )
+
+    asyncio.run(run())
+
+
+def test_manual_login_without_network_stays_on_login(monkeypatch):
+    monkeypatch.setattr(SecretStorage, "get_auth", lambda: (None, None))
+
+    async def no_network(cookies, user_agent):
+        raise NetworkError("Нет связи с сайтом")
+
+    monkeypatch.setattr(FicbookAPI, "login", no_network)
+    cookies = '[{"name": "rme", "value": "1"}, {"name": "PHPSESSID", "value": "2"}]'
+
+    async def run():
+        async with FWriterApp().run_test() as pilot:
+            await pilot.pause()
+            pilot.app.screen.query_one("#cookies", Input).value = cookies
+            pilot.app.screen.query_one("#user_agent", Input).value = "Mozilla/5.0"
+            await pilot.pause()
+            await pilot.click("#login")
+            await pilot.pause()
+            assert isinstance(pilot.app.screen, LoginScreen)
+            assert not pilot.app.screen.query_one("#login").disabled
+            assert [n.message for n in pilot.app._notifications] == [
+                "Не удалось войти\nНет связи с сайтом"
+            ]
 
     asyncio.run(run())

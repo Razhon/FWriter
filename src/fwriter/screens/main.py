@@ -28,8 +28,6 @@ FIC_SECTIONS: list[tuple[Role, str]] = [
 ]
 
 # без сессии и без связи следующие запросы упадут так же
-# shortcut: без связи загрузка просто обрывается; по дизайну - списки из fic.json,
-# добавить вместе с офлайн-режимом
 STOP_LOADING = (UserNotLoggedInError, NetworkError)
 
 
@@ -91,13 +89,17 @@ class ChapterButton(ClickableLabel):
 
 
 def fic_collapsible(
-    fic: Fic, role: Role, gone: list[SlimChapterInfo] | None = None
+    fic: Fic,
+    role: Role,
+    gone: list[SlimChapterInfo] | None = None,
+    new: list[SlimChapterInfo] | None = None,
 ) -> Collapsible:
-    """gone - главы с черновиком, которых нет на сайте: правятся, F5 создаёт заново."""
+    """gone - черновики глав, удалённых на сайте; new - неотправленные new-N."""
     chapters: list[ClickableLabel] = [
         ChapterButton(fic, ch, role) for ch in fic.chapters
     ]
     chapters += [ChapterButton(fic, ch, role, " (нет на сайте)") for ch in gone or []]
+    chapters += [ChapterButton(fic, ch, role, " (не отправлена)") for ch in new or []]
     if can_manage(role, fic.readonly):
         chapters.append(
             ClickableLabel(
@@ -124,7 +126,11 @@ class StartPageTab(TabPane):
             self.role = role
             super().__init__()
 
-    def __init__(self, api: FicbookAPI, storage: ChapterStorage) -> None:
+    class Relogin(Message):
+        """Повторить вход из офлайна; обрабатывает App."""
+
+    def __init__(self, api: FicbookAPI | None, storage: ChapterStorage) -> None:
+        """api None - офлайн: список работ из fic.json."""
         self.api = api
         self.storage = storage
         # одно уведомление на загрузку, а не на каждый fic.json
@@ -132,7 +138,13 @@ class StartPageTab(TabPane):
         super().__init__("Начало работы", id="start_page")
 
     def compose(self) -> ComposeResult:
-        yield Center(Label("Привет, гость!", id="greeting"))
+        if self.api:
+            yield Center(Label("Привет, гость!", id="greeting"))
+        else:
+            yield Center(
+                Label("Офлайн: список работ с последнего входа", id="greeting")
+            )
+            yield Center(ClickableLabel("Повторить вход", classes="relogin_btn"))
         yield Rule()
         yield VerticalScroll(classes="fics_container")
 
@@ -143,6 +155,9 @@ class StartPageTab(TabPane):
     @work(exclusive=True, group="start_page")
     async def load_start_page(self) -> None:
         """Ник и списки фанфиков; ошибка одного списка не прячет остальные."""
+        if self.api is None:
+            await self.load_offline()
+            return
         try:
             # после входа ник уже есть, запроса не будет
             user = await self.api.get_user_info()
@@ -151,7 +166,6 @@ class StartPageTab(TabPane):
             report_api_error(self, e, "Не удалось загрузить профиль")
             if isinstance(e, STOP_LOADING):
                 return
-        fics_container = self.query_one(".fics_container", VerticalScroll)
 
         seen: set[str] = set()
         # без какого-то списка не понять, какие работы пропали с сайта
@@ -185,7 +199,10 @@ class StartPageTab(TabPane):
                             return
                         fic.readonly = stored.readonly if stored else True
                         fic.chapters = stored.chapters if stored else []
-                        collapsibles.append(fic_collapsible(fic, role))
+                        # список не с сайта: удалённые главы не определить
+                        collapsibles.append(
+                            self.collapsible(fic, role, find_gone=False)
+                        )
                         continue
                     # сайт не отдаёт главы работы без прав: остаётся последний список
                     if fic.readonly and stored:
@@ -200,19 +217,49 @@ class StartPageTab(TabPane):
                 else:
                     self.save_fic(fic, role)
                 # без прав список глав не с сайта: удалённые не определить
-                gone = [] if fic.readonly else self.gone_chapters(fic)
-                collapsibles.append(fic_collapsible(fic, role, gone))
-
-            if fics_container.children:  # разделитель
-                await fics_container.mount(Rule())
-
-            await fics_container.mount(
-                Label(f"{label}:", classes="fics_collapsibles_label"),
-                *collapsibles,
-            )
+                collapsibles.append(
+                    self.collapsible(fic, role, find_gone=not fic.readonly)
+                )
+            await self.mount_section(label, collapsibles)
 
         if all_loaded:
             await self.show_gone(seen)
+
+    async def load_offline(self) -> None:
+        """Разделы из fic.json - списка с последнего входа."""
+        stored, errors = self.storage.read_fics()
+        if errors:
+            self.notify(
+                "\n".join(errors),
+                title="Часть работ не показана",
+                severity="error",
+                markup=False,
+            )
+        for role, label in FIC_SECTIONS:
+            await self.mount_section(
+                label,
+                [
+                    # fic.json - последний список с сайта
+                    self.collapsible(fic, role, find_gone=not fic.readonly)
+                    for fic, fic_role in stored
+                    if fic_role == role
+                ],
+            )
+
+    async def mount_section(self, label: str, collapsibles: list[Collapsible]) -> None:
+        if not collapsibles:
+            return
+        fics_container = self.query_one(".fics_container", VerticalScroll)
+        if fics_container.children:  # разделитель
+            await fics_container.mount(Rule())
+        await fics_container.mount(
+            Label(f"{label}:", classes="fics_collapsibles_label"), *collapsibles
+        )
+
+    def collapsible(self, fic: Fic, role: Role, find_gone: bool) -> Collapsible:
+        """Работа вместе с локальными главами: удалёнными на сайте и new-N."""
+        gone = self.gone_chapters(fic) if find_gone else []
+        return fic_collapsible(fic, role, gone, self.storage.new_chapters(fic.id))
 
     async def show_gone(self, seen: set[str]) -> None:
         """Работы из fic.json, которых нет ни в одном списке сайта: черновики остаются."""
@@ -227,23 +274,18 @@ class StartPageTab(TabPane):
             chapters = [
                 known.get(ch.id, ch) for ch in self.storage.local_chapters(fic.id)
             ]
-            if chapters:
+            new = self.storage.new_chapters(fic.id)
+            if chapters or new:
                 # readonly: отправлять некуда
                 gone.append(
-                    fic_collapsible(Fic(fic.id, fic.title, chapters, True), role)
+                    fic_collapsible(
+                        Fic(fic.id, fic.title, chapters, True), role, new=new
+                    )
                 )
-        if not gone:
-            return
-        fics_container = self.query_one(".fics_container", VerticalScroll)
-        if fics_container.children:
-            await fics_container.mount(Rule())
-        await fics_container.mount(
-            Label(
-                "Нет на сайте (работа удалена или у вас больше нет к ней доступа), "
-                "локальные черновики только для чтения:",
-                classes="fics_collapsibles_label",
-            ),
-            *gone,
+        await self.mount_section(
+            "Нет на сайте (работа удалена или у вас больше нет к ней доступа), "
+            "локальные черновики только для чтения",
+            gone,
         )
 
     def gone_chapters(self, fic: Fic) -> list[SlimChapterInfo]:
@@ -275,6 +317,10 @@ class StartPageTab(TabPane):
                     severity="error",
                 )
 
+    @on(ClickableLabel.Pressed, ".relogin_btn")
+    def on_relogin_pressed(self) -> None:
+        self.post_message(StartPageTab.Relogin())
+
     @on(ClickableLabel.Pressed, ".chapter_btn")
     def on_chapter_pressed(self, event: ClickableLabel.Pressed) -> None:
         btn = event.clabel
@@ -291,7 +337,10 @@ class MainScreen(Screen):
         Binding("ctrl+w", "close_chapter", "Закрыть главу", priority=True),
     ]
 
-    def __init__(self, api: FicbookAPI, storage: ChapterStorage | None = None) -> None:
+    def __init__(
+        self, api: FicbookAPI | None, storage: ChapterStorage | None = None
+    ) -> None:
+        """api None - офлайн: только локальные черновики."""
         self.api = api
         self.storage = storage or ChapterStorage(DATA_DIR)
         # tab_id глав, которые сейчас скачиваются: повторный клик не шлёт второй GET
@@ -341,6 +390,12 @@ class MainScreen(Screen):
             return
         title = chapter.title
         if text is None:
+            if self.api is None:
+                self.notify(
+                    "Не удалось скачать главу\nОфлайн, а локальной копии главы нет",
+                    severity="warning",
+                )
+                return
             # от проверки fetching до add синхронно, так что пока идёт запрос,
             # эту главу никто не откроет и черновик для неё не появится
             self.fetching.add(tab_id)
@@ -402,4 +457,5 @@ class MainScreen(Screen):
             await tabbed.remove_pane(tabbed.active)
 
     async def on_unmount(self) -> None:
-        await self.api.close()
+        if self.api:
+            await self.api.close()

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sys
 from dataclasses import asdict, dataclass, field, replace
@@ -10,6 +11,8 @@ from typing import Literal, get_args
 from platformdirs import user_data_dir
 
 from .api.models import Fic, Role, SlimChapterInfo
+
+log = logging.getLogger(__name__)
 
 # appauthor=False: без лишней вложенной папки fwriter/fwriter в Windows
 DATA_DIR = Path(user_data_dir("fwriter", appauthor=False))
@@ -139,6 +142,7 @@ class ChapterStorage:
             try:
                 fics.append(self._read_fic(path))
             except OSError, ValueError:
+                log.warning("fic.json не прочитан: %s", path, exc_info=True)
                 errors.append(f"Файл {path} повреждён")
         return fics, errors
 

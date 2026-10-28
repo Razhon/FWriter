@@ -80,7 +80,10 @@ class FicbookAPI:
     async def login(
         cls, cookies: dict[str, str], user_agent: str | None = None
     ) -> FicbookAPI:
-        """Готовый API с проверенными cookies; иначе LoginFailedError."""
+        """Готовый API с проверенными cookies; иначе LoginFailedError.
+
+        Сайт недоступен (NetworkError, временная SiteError) - ошибка как есть.
+        """
         api = cls(cookies, user_agent)
         try:
             await api._check_login()
@@ -94,9 +97,12 @@ class FicbookAPI:
         try:
             response = await self._get("/")
             self.user = self._parse_user(response.text)
-        # shortcut: без связи тоже LoginFailedError, и run.py ведёт на вход, а не в
-        # офлайн по fic.json; пропускать NetworkError наверх вместе с офлайн-режимом
         except FicbookAPIError as e:
+            # сайт недоступен - не повод входить заново: run.py уходит в офлайн
+            if isinstance(e, NetworkError) or (
+                isinstance(e, SiteError) and e.temporary
+            ):
+                raise
             raise LoginFailedError(str(e)) from e
 
     async def close(self) -> None:

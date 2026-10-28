@@ -146,6 +146,21 @@ def test_login(monkeypatch, response: httpx.Response, ok: bool):
         assert closed
 
 
+@pytest.mark.parametrize(
+    "error",
+    [NetworkError("Нет связи с сайтом"), SiteError(503), SiteError(429)],
+)
+def test_login_site_unavailable_passes_through(monkeypatch, error):
+    """Недоступный сайт - не LoginFailedError: run.py уходит в офлайн, а не на вход."""
+
+    async def fake_get(self, path: str) -> httpx.Response:
+        raise error
+
+    monkeypatch.setattr(FicbookAPI, "_get", fake_get)
+    with pytest.raises(type(error)):
+        asyncio.run(FicbookAPI.login({}))
+
+
 def test_expired_session_get_raises():
     logged_out = BETA_PAGE.replace("profile-area", "login-area")
 

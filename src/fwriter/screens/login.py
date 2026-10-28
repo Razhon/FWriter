@@ -8,8 +8,9 @@ from textual.screen import Screen
 from textual.widgets import Button, Input
 
 from ..core.api.client import FicbookAPI
-from ..core.api.errors import LoginFailedError
+from ..core.api.errors import FicbookAPIError, LoginFailedError
 from ..secrets import SecretStorage
+from .api_errors import report_api_error
 from .error import ErrorScreen
 
 log = logging.getLogger(__name__)
@@ -82,6 +83,11 @@ class LoginScreen(Screen):
             log.warning("вход не удался", exc_info=True)
             event.button.disabled = False
             self.app.push_screen(ErrorScreen(str(e)))
+            return
+        # сайт недоступен: офлайн - только по сохранённому входу при запуске
+        except FicbookAPIError as e:
+            event.button.disabled = False
+            report_api_error(self, e, "Не удалось войти")
             return
 
         try:

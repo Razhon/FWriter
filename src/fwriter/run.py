@@ -14,7 +14,7 @@ from textual.binding import BindingType
 from textual.screen import Screen
 
 from .core.api.client import FicbookAPI
-from .core.api.errors import LoginFailedError
+from .core.api.errors import LoginFailedError, NetworkError, SiteError
 from .core.storage import DATA_DIR, lock_data_dir
 from .screens import *
 from .secrets import *
@@ -50,6 +50,12 @@ class FWriterApp(App):
         )
 
     def on_mount(self) -> None:
+        self.login_saved_or_ask()
+
+    def on_start_page_tab_relogin(self) -> None:
+        self.login_saved_or_ask()
+
+    def login_saved_or_ask(self) -> None:
         try:
             cookies, user_agent = SecretStorage.get_auth()
         except Exception:  # у бэкендов keyring свои типы ошибок
@@ -76,13 +82,34 @@ class FWriterApp(App):
             self.switch_mode("login")
             self.push_screen(ErrorScreen(f"Не удалось войти: {e}"))
             return
+        except (NetworkError, SiteError) as e:  # login() пропускает только временные
+            log.warning("сайт недоступен, работаем офлайн", exc_info=True)
+            self.notify(f"{e}. Работаем офлайн", severity="warning")
+            # повтор из офлайна: открытые вкладки не закрываем
+            if not (self.main_screen and self.main_screen.api is None):
+                self.open_main(None)
+            return
+        # здесь main_screen - только офлайн; как при истёкшей сессии, без записи
+        # черновиков экран не снимаем, иначе правки пропадут вместе с вкладками
+        if self.main_screen and not self.main_screen.save_all(notify=False):
+            await api.close()
+            self.notify(
+                "Не удалось записать черновик на диск, остаёмся офлайн",
+                severity="error",
+            )
+            return
         self.open_main(api)
 
-    def open_main(self, api: FicbookAPI) -> None:
+    def open_main(self, api: FicbookAPI | None) -> None:
+        """api None - офлайн: список работ из fic.json."""
         # режим, а не install_screen: после повторного входа нужен новый MainScreen
-        if self.main_screen:  # остался после истёкшей сессии с незаписанным черновиком
+        # остался после истёкшей сессии с незаписанным черновиком или офлайн;
+        # вкладки глав пишут черновик на диск при снятии экрана
+        if self.main_screen:
             # shortcut: если запись не удастся и здесь, правки пропадут без вопроса;
             # спрашивать, как при выходе, если такой сбой случится на деле
+            if self.current_mode == "main":  # повтор входа из офлайна
+                self.switch_mode("login")
             self.remove_mode("main")
         main = self.main_screen = MainScreen(api)
         self.add_mode("main", lambda: main)
