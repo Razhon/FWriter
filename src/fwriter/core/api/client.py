@@ -7,7 +7,7 @@ from collections import deque
 from typing import ClassVar
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from .errors import *
 from .models import Chapter, Fic, Role, SlimChapterInfo, UserInfo
@@ -201,14 +201,7 @@ class FicbookAPI:
 
     async def get_chapter(self, fic_id: str, chapter_id: str) -> Chapter:
         """Текст, название и статус главы со страницы её редактирования."""
-        response = await self._get(f"/home/myfics/{fic_id}/parts/{chapter_id}")
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        form = req(soup.find("form", id="savePartForm"), "форма главы (savePartForm)")
-        editor = req(form.find("fanfic-editor"), "редактор главы (fanfic-editor)")
-        content = editor.get("initial-value")
-        if content is None:  # пустой текст допустим, отсутствие атрибута - нет
-            raise APIChangedError("Не найдено на странице: текст главы (initial-value)")
+        form, content = await self._chapter_form(fic_id, chapter_id)
         title_input = req(form.find("input", attrs={"name": "title"}), "поле названия")
         # кнопок статуса нет у беты; если они есть, одна обязана быть отмечена
         params = form.find_all("input", attrs={"name": "param"})
@@ -221,10 +214,79 @@ class FicbookAPI:
 
         return Chapter(
             title=str(title_input.get("value", "")),
-            content=str(content),
+            content=content,
             title_editable=not title_input.has_attr("disabled"),
             status=int(status) if status is not None else None,
         )
+
+    async def _chapter_form(self, fic_id: str, chapter_id: str) -> tuple[Tag, str]:
+        """Форма со страницы главы и текст главы на сайте."""
+        response = await self._get(f"/home/myfics/{fic_id}/parts/{chapter_id}")
+        soup = BeautifulSoup(response.text, "html.parser")
+        form = req(soup.find("form", id="savePartForm"), "форма главы (savePartForm)")
+        editor = req(form.find("fanfic-editor"), "редактор главы (fanfic-editor)")
+        content = editor.get("initial-value")
+        if content is None:  # пустой текст допустим, отсутствие атрибута - нет
+            raise APIChangedError("Не найдено на странице: текст главы (initial-value)")
+        return form, str(content)
+
+    async def save_chapter(
+        self, fic_id: str, chapter_id: str, content: str, title: str, base: str
+    ) -> None:
+        """Текст и название; base - текст сайта, от которого шёл черновик."""
+        # свежая форма: старая откатила бы статус, поменянный на сайте
+        form, site_content = await self._chapter_form(fic_id, chapter_id)
+        if site_content != base:
+            raise ChapterChangedError()
+        url = str(req(form.get("action"), "адрес сохранения (action)"))
+        overrides = {"title": title, "change_description": ""}
+        fields = [
+            (name, overrides.get(name, value))
+            for name, value in self._form_fields(form)
+        ]
+        await self._post_form(url, [*fields, ("content", content)])
+
+    @staticmethod
+    def _form_fields(form) -> list[tuple[str, str]]:
+        """Поля формы, как их отправит браузер."""
+        fields = []
+        for element in form.find_all(attrs={"name": True}):
+            name = str(element["name"])
+            if element.name not in ("input", "textarea"):
+                # не отправив select или Vue-компонент, сбросили бы настройку
+                raise APIChangedError(f"Неизвестное поле формы: {element.name} {name}")
+            if element.has_attr("disabled"):
+                continue
+            if element.name == "textarea":
+                fields.append((name, element.get_text()))
+            elif element.get("type") not in ("radio", "checkbox"):
+                fields.append((name, str(element.get("value", ""))))
+            elif element.has_attr("checked"):
+                fields.append((name, str(element.get("value", "on"))))
+        return fields
+
+    async def _post_form(self, url: str, fields: list[tuple[str, str]]) -> dict:
+        """POST формы; возвращает data из JSON-ответа."""
+        # httpx не берёт список пар
+        data: dict[str, list[str]] = {}
+        for name, value in fields:
+            data.setdefault(name, []).append(value)
+        response = await self._post(url, data=data)
+        try:
+            answer = response.json()
+        except ValueError as e:
+            raise APIChangedError("Сайт ответил не JSON на отправку формы") from e
+        if not isinstance(answer, dict):
+            raise APIChangedError("Сайт ответил не объектом на отправку формы")
+        # капча тоже с result: false
+        if answer.get("captcha_required"):
+            raise SiteRejectedError(SiteRejectedError.CAPTCHA_TEXT, captcha=True)
+        if answer.get("result") is True:
+            return answer.get("data") or {}
+        if error := answer.get("error"):
+            texts = error.values() if isinstance(error, dict) else [error]
+            raise SiteRejectedError("; ".join(str(text) for text in texts))
+        raise APIChangedError("В ответе на отправку формы нет ни result, ни error")
 
     async def _get(self, url: str) -> httpx.Response:
         response = await self._send("GET", url)

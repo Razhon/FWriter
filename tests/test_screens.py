@@ -13,6 +13,7 @@ from fwriter.core.api.errors import (
     LoginFailedError,
     NetworkError,
     SiteError,
+    SiteRejectedError,
     UserNotLoggedInError,
 )
 from fwriter.core.api.models import Chapter, Fic, SlimChapterInfo, UserInfo
@@ -778,6 +779,10 @@ def test_report_api_error():
             # 429 и 5xx пройдут сами, как и сбой сети
             for status in (503, 429, 404):
                 report_api_error(app.screen, SiteError(status), "Не вышло")
+            # капча пройдёт сама, отказ проверки - нет
+            captcha = SiteRejectedError("К", captcha=True)
+            report_api_error(app.screen, captcha, "Не вышло")
+            report_api_error(app.screen, SiteRejectedError("Пусто"), "Не вышло")
             await pilot.pause()
             notes = [(n.message, n.severity) for n in app._notifications]
             assert notes == [
@@ -785,6 +790,8 @@ def test_report_api_error():
                 ("Не вышло\nСайт временно не работает (ошибка 503)", "warning"),
                 (f"Не вышло\n{SiteError.TEXTS[429]}", "warning"),
                 (f"Не вышло\n{SiteError.TEXTS[404]}", "error"),
+                ("Не вышло\nК", "warning"),
+                ("Не вышло\nПусто", "error"),
             ]
 
             report_api_error(app.screen, UserNotLoggedInError("Сессия истекла"), "-")

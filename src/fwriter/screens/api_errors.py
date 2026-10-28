@@ -7,6 +7,7 @@ from ..core.api.errors import (
     FicbookAPIError,
     NetworkError,
     SiteError,
+    SiteRejectedError,
     UserNotLoggedInError,
 )
 from .error import ErrorScreen
@@ -33,9 +34,13 @@ def report_api_error(widget: Widget, e: FicbookAPIError, action: str) -> None:
         case UserNotLoggedInError():
             widget.post_message(SessionExpired(str(e)))
         # временная: повторит сам человек
-        case NetworkError() | SiteError(temporary=True):
+        case (
+            NetworkError()
+            | SiteError(temporary=True)
+            | SiteRejectedError(temporary=True)
+        ):
             widget.notify(text, severity="warning")
-        case SiteError():
+        case SiteError() | SiteRejectedError():
             widget.notify(text, severity="error")
         # APIChangedError и прочее: само не пройдёт, нужна новая версия
         case _ if isinstance(widget.app.screen, ErrorScreen):

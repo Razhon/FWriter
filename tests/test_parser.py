@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl
 
 import httpx
 import pytest
@@ -11,9 +12,11 @@ import pytest
 from fwriter.core.api.client import FicbookAPI
 from fwriter.core.api.errors import (
     APIChangedError,
+    ChapterChangedError,
     LoginFailedError,
     NetworkError,
     SiteError,
+    SiteRejectedError,
     UserNotLoggedInError,
 )
 from fwriter.core.api.models import Chapter, Role, UserInfo
@@ -321,3 +324,118 @@ def test_rate_limit_window(monkeypatch):
     # первые два сразу, дальше каждый ждёт, пока из окна выйдет запрос на 2 раньше
     assert starts[1] - starts[0] < 0.1
     assert all(b - a >= 0.29 for a, b in zip(starts, starts[2:], strict=False))
+
+
+TEXT = "Новый\n<tab>текст"
+
+
+def save(
+    html: str, answer: httpx.Response, base: str | None = None
+) -> list[tuple[str, str]]:
+    """save_chapter на странице главы html; возвращает отправленные поля.
+
+    base по умолчанию - текст главы на странице, то есть сайт не менялся.
+    """
+    if base is None:
+        base = get_chapter(html).content
+    sent: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert request.url.path == "/home/myfics/1/parts/2"
+            return httpx.Response(200, text=html)
+        sent.extend(parse_qsl(request.content.decode(), keep_blank_values=True))
+        sent.insert(0, ("<url>", request.url.path))
+        return answer
+
+    asyncio.run(mock_api(handler).save_chapter("1", "2", TEXT, "Т", base))
+    return sent
+
+
+def test_save_chapter_changed_on_site():
+    """Главу изменили на сайте после синхронизации: до POST не доходит."""
+    post = httpx.Response(500)  # дошло бы - был бы SiteError
+    with pytest.raises(ChapterChangedError):
+        save(chapter_page("author_draft"), post, base="Старый текст")
+
+
+OK = httpx.Response(200, json={"result": True, "data": {"redirect": "/"}})
+
+
+def test_save_chapter_author():
+    sent = save(chapter_page("author_draft"), OK)
+
+    assert sent == [
+        ("<url>", "/home/fanfics/partauthoredit_save"),
+        ("part_id", "2001"),
+        ("title", "Т"),
+        ("comment_before", ""),
+        ("comment_after", ""),
+        ("param", "1"),
+        ("auto_pub", "1"),
+        ("part_auto_pub_date", "2026-11-02 02:06"),
+        ("continue_required_votes", "0"),
+        ("content", TEXT),
+    ]
+
+
+def test_save_chapter_coauthor_keeps_deferred():
+    """Статус и дата отложенной главы уходят как есть, пояснение - пустым."""
+    sent = dict(save(chapter_page("coauthor_deferred"), OK))
+
+    assert sent["param"] == "3"
+    assert sent["part_auto_pub_date"] == "2026-12-30 12:00"
+    assert sent["change_description"] == ""
+    assert sent["title"] == "Т"
+
+
+def test_save_chapter_beta():
+    """Название у беты disabled и не уходит; примечания - как есть."""
+    sent = dict(save(chapter_page("beta"), OK))
+
+    assert sent["<url>"] == "/home/fanfics/partbetaedit_save"
+    assert "title" not in sent
+    assert "param" not in sent
+    assert sent["change_description"] == ""
+    assert sent["comment_before"] != ""
+
+
+def test_save_chapter_unknown_field_raises():
+    html = chapter_page("author_draft").replace(
+        "<textarea class=", '<select name="x"></select><textarea class=', 1
+    )
+    with pytest.raises(APIChangedError, match="select x"):
+        save(html, OK)
+
+
+@pytest.mark.parametrize(
+    ("answer", "error", "text"),
+    [
+        (
+            {"result": False, "error": {"title": "Пусто.", "content": "Нет текста."}},
+            SiteRejectedError,
+            "Пусто.; Нет текста.",
+        ),
+        ({"error": {"title": "Длинно"}}, SiteRejectedError, "Длинно"),
+        ({"result": False, "error": "Строкой"}, SiteRejectedError, "Строкой"),
+        # капча раньше error
+        (
+            {"result": False, "captcha_required": True, "error": "x"},
+            SiteRejectedError,
+            SiteRejectedError.CAPTCHA_TEXT,
+        ),
+        ({"result": False}, APIChangedError, "ни result, ни error"),
+        ([], APIChangedError, "не объектом"),
+    ],
+)
+def test_post_form_answers(answer, error: type[Exception], text: str):
+    with pytest.raises(error) as e:
+        save(chapter_page("author_draft"), httpx.Response(200, json=answer))
+    assert text in str(e.value)
+    if isinstance(e.value, SiteRejectedError):
+        assert e.value.temporary == ("captcha_required" in answer)
+
+
+def test_post_form_not_json():
+    with pytest.raises(APIChangedError, match="не JSON"):
+        save(chapter_page("author_draft"), httpx.Response(200, text="<html>"))

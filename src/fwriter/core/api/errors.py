@@ -45,3 +45,24 @@ class SiteError(FicbookAPIError):
     def temporary(self) -> bool:
         """Пройдёт само: лимит запросов или сбой сервера."""
         return self.status == 429 or self.status >= 500
+
+
+class SiteRejectedError(FicbookAPIError):
+    """Сайт ответил на POST отказом: текст из error или капча."""
+
+    CAPTCHA_TEXT = "Сайт требует капчу. Подождите и отправьте позже"
+
+    def __init__(self, text: str, captcha: bool = False) -> None:
+        # капча пройдёт сама, а отказ проверки - нет
+        self.temporary = captcha
+        super().__init__(text)
+
+
+class ChapterChangedError(SiteRejectedError):
+    """Текст главы на сайте не тот, от которого шёл черновик."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Пока вы готовили отправку, главу изменили на сайте. "
+            "Обновитесь и отправьте снова"
+        )
