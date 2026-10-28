@@ -39,6 +39,24 @@ ClickableLabel {
     padding: 1;
 }
 
+.chapter_row {
+    height: auto;
+
+    /* крестик сразу за названием, а не у правого края */
+    .chapter_btn {
+        width: auto;
+    }
+}
+
+.trash_btn {
+    width: auto;
+    color: $text-muted;
+
+    &.-armed {
+        color: $error;
+    }
+}
+
 Collapsible {
     padding: 0;
     border-top: none;

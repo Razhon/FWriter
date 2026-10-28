@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from functools import partial
 from typing import ClassVar
@@ -5,15 +6,26 @@ from typing import ClassVar
 from textual import events, on, work
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Center, VerticalScroll
+from textual.containers import Center, Horizontal, VerticalScroll
 from textual.content import Content
 from textual.message import Message
 from textual.screen import Screen
-from textual.widgets import Collapsible, Label, Rule, TabbedContent, TabPane, Tabs
+from textual.timer import Timer
+from textual.widget import Widget
+from textual.widgets import (
+    Collapsible,
+    Footer,
+    Label,
+    Rule,
+    TabbedContent,
+    TabPane,
+    Tabs,
+)
 
 from ..core.api.client import FicbookAPI
 from ..core.api.errors import FicbookAPIError, NetworkError, UserNotLoggedInError
 from ..core.api.models import Fic, Role, SlimChapterInfo, can_manage
+from ..core.catalog import plan_fic
 from ..core.storage import DATA_DIR, ChapterMeta, ChapterStorage
 from .api_errors import report_api_error
 from .chapter import ChapterTab
@@ -75,49 +87,72 @@ class ClickableLabel(Label, can_focus=True):
             return
         self.add_class("-active")
         self.set_timer(0.2, partial(self.remove_class, "-active"))
+        self.press()
+
+    def press(self) -> None:
+        """Сообщение о нажатии; подклассы шлют свои."""
         self.post_message(ClickableLabel.Pressed(self))
 
 
-class ChapterButton(ClickableLabel):
+class TrashButton(ClickableLabel):
+    """Перенос в корзину: первое нажатие спрашивает, второе за CONFIRM_DELAY удаляет.
+
+    chapter None - работа целиком.
+    """
+
+    CONFIRM_DELAY = 3.0
+
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("x", "press", "Удалить")]
+
+    class Confirmed(Message):
+        """Второе нажатие: перенести в корзину."""
+
+        def __init__(self, button: TrashButton) -> None:
+            self.button = button
+            super().__init__()
+
+        @property
+        def control(self) -> TrashButton:
+            return self.button
+
     def __init__(
-        self, fic: Fic, chapter: SlimChapterInfo, role: Role, mark: str = ""
+        self,
+        fic: Fic,
+        chapter: SlimChapterInfo | None,
+        label: str = "X",
+        prompt: str = "Удалить? X",
     ) -> None:
         self.fic = fic
         self.chapter = chapter
-        self.role: Role = role
-        super().__init__(chapter.title + mark, classes="chapter_btn")
+        self.idle_label = label
+        self.prompt = prompt
+        self.reset_timer: Timer | None = None
+        super().__init__(label, classes="trash_btn")
+
+    def press(self) -> None:
+        """Второе нажатие шлёт Confirmed; первое только меняет надпись."""
+        if self.reset_timer:
+            self.disarm()
+            self.post_message(TrashButton.Confirmed(self))
+            return
+        self.add_class("-armed")
+        # {n} - глав сейчас: часть могли удалить после построения списка
+        n = self.query_ancestor(FicCollapsible).chapter_count()
+        self.update(self.prompt.format(n=n))
+        self.reset_timer = self.set_timer(self.CONFIRM_DELAY, self.disarm)
+
+    def disarm(self) -> None:
+        if self.reset_timer:
+            self.reset_timer.stop()
+            self.reset_timer = None
+        self.remove_class("-armed")
+        self.update(self.idle_label)
 
 
-def fic_collapsible(
-    fic: Fic,
-    role: Role,
-    gone: list[SlimChapterInfo] | None = None,
-    new: list[SlimChapterInfo] | None = None,
-) -> Collapsible:
-    """gone - черновики глав, удалённых на сайте; new - неотправленные new-N."""
-    chapters: list[ClickableLabel] = [
-        ChapterButton(fic, ch, role) for ch in fic.chapters
-    ]
-    chapters += [ChapterButton(fic, ch, role, " (нет на сайте)") for ch in gone or []]
-    chapters += [ChapterButton(fic, ch, role, " (не отправлена)") for ch in new or []]
-    if can_manage(role, fic.readonly):
-        chapters.append(
-            ClickableLabel(
-                "[bold]Новая глава ->[/]",
-                classes="new_chapter_btn",
-                markup=True,
-            )
-        )
-    return Collapsible(
-        *chapters,
-        # типизирует title как str, но принимает Content; str разбирается как разметка
-        title=Content(fic.title),  # pyright: ignore[reportArgumentType]
-        classes=f"{role}_fics_collapsible",
-    )
+class ChapterButton(ClickableLabel):
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("x", "trash", "Удалить")]
 
-
-class StartPageTab(TabPane):
-    class OpenChapter(Message):
+    class Open(Message):
         """Нажата глава; открывает MainScreen."""
 
         def __init__(self, fic: Fic, chapter: SlimChapterInfo, role: Role) -> None:
@@ -126,6 +161,107 @@ class StartPageTab(TabPane):
             self.role = role
             super().__init__()
 
+    def __init__(
+        self,
+        fic: Fic,
+        chapter: SlimChapterInfo,
+        role: Role,
+        mark: str = "",
+        trash: TrashButton | None = None,
+    ) -> None:
+        """trash - крестик в строке главы, если её можно удалить."""
+        self.fic = fic
+        self.chapter = chapter
+        self.role: Role = role
+        self.trash = trash
+        super().__init__(chapter.title + mark, classes="chapter_btn")
+
+    def press(self) -> None:
+        self.post_message(ChapterButton.Open(self.fic, self.chapter, self.role))
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
+        # False прячет подсказку в footer у глав с сайта
+        return action != "trash" or self.trash is not None
+
+    def action_trash(self) -> None:
+        if self.trash:
+            self.trash.action_press()
+
+
+class FicCollapsible(Collapsible):
+    """Работа в списке; gone_fic - её нет на сайте."""
+
+    def __init__(
+        self, *children: Widget, fic: Fic, gone_fic: bool, classes: str
+    ) -> None:
+        self.fic = fic
+        self.gone_fic = gone_fic
+        super().__init__(
+            *children,
+            # типизирует title как str, но принимает Content; str разбирается как разметка
+            title=Content(fic.title),  # pyright: ignore[reportArgumentType]
+            classes=classes,
+        )
+
+    def chapter_count(self) -> int:
+        return len(self.query(ChapterButton))
+
+
+def chapter_row(
+    fic: Fic, chapter: SlimChapterInfo, role: Role, mark: str = "", trash: bool = False
+) -> Widget:
+    """Кнопка главы; с trash - в одной строке с крестиком удаления."""
+    if not trash:
+        return ChapterButton(fic, chapter, role, mark)
+    btn = TrashButton(fic, chapter)
+    return Horizontal(
+        ChapterButton(fic, chapter, role, mark, btn), btn, classes="chapter_row"
+    )
+
+
+def fic_collapsible(
+    fic: Fic,
+    role: Role,
+    gone: list[SlimChapterInfo] | None = None,
+    new: list[SlimChapterInfo] | None = None,
+    gone_fic: bool = False,
+) -> FicCollapsible:
+    """gone - черновики глав, удалённых на сайте; new - неотправленные new-N.
+
+    gone_fic - работы нет на сайте: удалить можно любую главу и работу целиком.
+    """
+    chapters: list[Widget] = [
+        chapter_row(fic, ch, role, trash=gone_fic) for ch in fic.chapters
+    ]
+    chapters += [
+        chapter_row(fic, ch, role, " (нет на сайте)", True) for ch in gone or []
+    ]
+    chapters += [
+        chapter_row(fic, ch, role, " (не отправлена)", True) for ch in new or []
+    ]
+    if gone_fic:
+        chapters.append(
+            TrashButton(
+                fic,
+                None,
+                "Удалить работу X",
+                "Удалить работу и её главы ({n})? Нажмите ещё раз",
+            )
+        )
+    if can_manage(role, fic.readonly):
+        chapters.append(
+            ClickableLabel(
+                "[bold]Новая глава ->[/]",
+                classes="new_chapter_btn",
+                markup=True,
+            )
+        )
+    return FicCollapsible(
+        *chapters, fic=fic, gone_fic=gone_fic, classes=f"{role}_fics_collapsible"
+    )
+
+
+class StartPageTab(TabPane):
     class Relogin(Message):
         """Повторить вход из офлайна; обрабатывает App."""
 
@@ -146,6 +282,8 @@ class StartPageTab(TabPane):
             )
             yield Center(ClickableLabel("Повторить вход", classes="relogin_btn"))
         yield Rule()
+        if self.api:
+            yield Label("Загружаем список работ…", id="loading")
         yield VerticalScroll(classes="fics_container")
 
     def on_mount(self) -> None:
@@ -159,8 +297,15 @@ class StartPageTab(TabPane):
             await self.load_offline()
             return
         try:
+            await self.load_online(self.api)
+        finally:
+            # и при ошибке, и при отмене воркера
+            self.query("#loading").remove()
+
+    async def load_online(self, api: FicbookAPI) -> None:
+        try:
             # после входа ник уже есть, запроса не будет
-            user = await self.api.get_user_info()
+            user = await api.get_user_info()
             self.query_one("#greeting", Label).update(Content(f"Привет, {user.name}!"))
         except FicbookAPIError as e:
             report_api_error(self, e, "Не удалось загрузить профиль")
@@ -170,12 +315,17 @@ class StartPageTab(TabPane):
         seen: set[str] = set()
         # без какого-то списка не понять, какие работы пропали с сайта
         all_loaded = True
-        for role, label in FIC_SECTIONS:
-            try:
-                fics = await self.api.get_fics(role)
-            except FicbookAPIError as e:
-                report_api_error(self, e, f"Не удалось загрузить список «{label}»")
-                if isinstance(e, STOP_LOADING):
+        # списки одновременно: 4 запроса укладываются в лимит частоты клиента;
+        # ответы разбираются по порядку, как раньше
+        results = await asyncio.gather(
+            *(api.get_fics(role) for role, _ in FIC_SECTIONS), return_exceptions=True
+        )
+        for (role, label), fics in zip(FIC_SECTIONS, results, strict=True):
+            if isinstance(fics, BaseException):
+                if not isinstance(fics, FicbookAPIError):
+                    raise fics
+                report_api_error(self, fics, f"Не удалось загрузить список «{label}»")
+                if isinstance(fics, STOP_LOADING):
                     return
                 all_loaded = False
                 continue
@@ -184,12 +334,13 @@ class StartPageTab(TabPane):
                 continue
             collapsibles: list[Collapsible] = []
             for fic in fics:
-                broken = False
+                readonly: bool | None = fic.readonly
+                stored, broken = None, False
                 # есть главы в карточке - есть право; без глав различает только /parts
                 if not fic.chapters:
                     stored, broken = self.stored_fic(fic.id)
                     try:
-                        fic.readonly = await self.api.is_readonly(fic.id)
+                        readonly = await api.is_readonly(fic.id)
                     except FicbookAPIError as e:
                         # раздел не прячем: работа из fic.json, без него - без прав
                         report_api_error(
@@ -197,29 +348,17 @@ class StartPageTab(TabPane):
                         )
                         if isinstance(e, STOP_LOADING):
                             return
-                        fic.readonly = stored.readonly if stored else True
-                        fic.chapters = stored.chapters if stored else []
-                        # список не с сайта: удалённые главы не определить
-                        collapsibles.append(
-                            self.collapsible(fic, role, find_gone=False)
-                        )
-                        continue
-                    # сайт не отдаёт главы работы без прав: остаётся последний список
-                    if fic.readonly and stored:
-                        fic.chapters = stored.chapters
-                # битый fic.json - единственный след списка глав работы без прав
-                if fic.readonly and broken:
+                        readonly = None
+                plan = plan_fic(fic, readonly, stored, broken)
+                if plan.broken_warning:
                     self.notify(
                         f"Файл работы «{fic.title}» повреждён, список глав не показан",
                         severity="error",
                         markup=False,
                     )
-                else:
-                    self.save_fic(fic, role)
-                # без прав список глав не с сайта: удалённые не определить
-                collapsibles.append(
-                    self.collapsible(fic, role, find_gone=not fic.readonly)
-                )
+                if plan.save:
+                    self.save_fic(plan.fic, role)
+                collapsibles.append(self.collapsible(plan.fic, role, plan.find_gone))
             await self.mount_section(label, collapsibles)
 
         if all_loaded:
@@ -246,14 +385,18 @@ class StartPageTab(TabPane):
                 ],
             )
 
-    async def mount_section(self, label: str, collapsibles: list[Collapsible]) -> None:
+    async def mount_section(
+        self, label: str, collapsibles: list[Collapsible], classes: str = ""
+    ) -> None:
+        """classes - у разделителя и подписи, чтобы убрать раздел целиком."""
         if not collapsibles:
             return
         fics_container = self.query_one(".fics_container", VerticalScroll)
         if fics_container.children:  # разделитель
-            await fics_container.mount(Rule())
+            await fics_container.mount(Rule(classes=classes))
         await fics_container.mount(
-            Label(f"{label}:", classes="fics_collapsibles_label"), *collapsibles
+            Label(f"{label}:", classes=f"fics_collapsibles_label {classes}"),
+            *collapsibles,
         )
 
     def collapsible(self, fic: Fic, role: Role, find_gone: bool) -> Collapsible:
@@ -264,11 +407,9 @@ class StartPageTab(TabPane):
     async def show_gone(self, seen: set[str]) -> None:
         """Работы из fic.json, которых нет ни в одном списке сайта: черновики остаются."""
         # повреждённые fic.json покажет офлайн-режим, здесь не до них
-        stored, _ = self.storage.read_fics()
+        stored, _ = self.storage.read_fics(skip=seen)
         gone: list[Collapsible] = []
         for fic, role in stored:
-            if fic.id in seen:
-                continue
             # без черновика главу уже не скачать; название - из fic.json
             known = {ch.id: ch for ch in fic.chapters}
             chapters = [
@@ -279,21 +420,22 @@ class StartPageTab(TabPane):
                 # readonly: отправлять некуда
                 gone.append(
                     fic_collapsible(
-                        Fic(fic.id, fic.title, chapters, True), role, new=new
+                        Fic(fic.id, fic.title, chapters, True),
+                        role,
+                        new=new,
+                        gone_fic=True,
                     )
                 )
         await self.mount_section(
             "Нет на сайте (работа удалена или у вас больше нет к ней доступа), "
             "локальные черновики только для чтения",
             gone,
+            "gone_section",
         )
 
     def gone_chapters(self, fic: Fic) -> list[SlimChapterInfo]:
         """Черновики глав, которых нет в списке с сайта: удалены на сайте."""
-        on_site = {ch.id for ch in fic.chapters}
-        return [
-            ch for ch in self.storage.local_chapters(fic.id) if ch.id not in on_site
-        ]
+        return self.storage.local_chapters(fic.id, skip={ch.id for ch in fic.chapters})
 
     def stored_fic(self, fic_id: str) -> tuple[Fic | None, bool]:
         """Работа из fic.json и признак, что файл есть, но не читается."""
@@ -328,11 +470,42 @@ class StartPageTab(TabPane):
         btn.update("Подключаемся…" if connecting else "Повторить вход")
         btn.disabled = connecting
 
-    @on(ClickableLabel.Pressed, ".chapter_btn")
-    def on_chapter_pressed(self, event: ClickableLabel.Pressed) -> None:
-        btn = event.clabel
-        assert isinstance(btn, ChapterButton)  # Pressed типизирован базовым классом
-        self.post_message(StartPageTab.OpenChapter(btn.fic, btn.chapter, btn.role))
+    async def on_trash_button_confirmed(self, event: TrashButton.Confirmed) -> None:
+        btn = event.button
+        fic_id = btn.fic.id
+        chapter_id = btn.chapter.id if btn.chapter else None
+        collapsible = btn.query_ancestor(FicCollapsible)
+        # от работы без глав остался бы только fic.json
+        whole = chapter_id is None or (
+            collapsible.gone_fic and collapsible.chapter_count() == 1
+        )
+        # иначе автосохранение вкладки создаст черновик заново
+        if self.query_ancestor(MainScreen).is_open(
+            fic_id, None if whole else chapter_id
+        ):
+            self.notify("Сначала закройте вкладку главы", severity="warning")
+            return
+        try:
+            # whole уже включает chapter_id None; проверка сужает тип для pyright
+            if chapter_id is None or whole:
+                self.storage.trash_fic(fic_id)
+            else:
+                self.storage.trash_chapter(fic_id, chapter_id)
+        except OSError:
+            log.warning(
+                "%s/%s не перенесена в корзину",
+                fic_id,
+                "*" if whole else chapter_id,
+                exc_info=True,
+            )
+            self.notify("Не удалось перенести в корзину", severity="error")
+            return
+        if not whole:
+            await btn.query_ancestor(".chapter_row", Horizontal).remove()
+            return
+        await collapsible.remove()
+        if not any(c.gone_fic for c in self.query(FicCollapsible)):
+            await self.query(".gone_section").remove()
 
 
 class MainScreen(Screen):
@@ -357,6 +530,17 @@ class MainScreen(Screen):
     def compose(self) -> ComposeResult:
         with TabbedContent():
             yield StartPageTab(self.api, self.storage)
+        yield Footer()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
+        # на стартовой вкладке F1 некуда переходить, а закрыть её нельзя
+        if action in ("start_page", "close_chapter"):
+            # до compose вкладок ещё нет
+            return any(t.active != "start_page" for t in self.query(TabbedContent))
+        return True
+
+    def on_tabbed_content_tab_activated(self) -> None:
+        self.refresh_bindings()
 
     # стартовая вкладка не закрывается, она же выбор глав
     def action_start_page(self) -> None:
@@ -365,7 +549,7 @@ class MainScreen(Screen):
         # фокус из скрытой вкладки главы вернул бы её обратно
         tabbed.query_one(Tabs).focus()
 
-    def on_start_page_tab_open_chapter(self, message: StartPageTab.OpenChapter) -> None:
+    def on_chapter_button_open(self, message: ChapterButton.Open) -> None:
         self.open_chapter(message.fic, message.chapter, message.role)
 
     # на экране, а не на вкладке: воркер живёт, пока открыты вкладки глав
@@ -450,6 +634,13 @@ class MainScreen(Screen):
             )
         )
         show()
+
+    def is_open(self, fic_id: str, chapter_id: str | None) -> bool:
+        """Открыта ли вкладка главы; chapter_id None - любой главы работы."""
+        return any(
+            tab.fic_id == fic_id and chapter_id in (None, tab.chapter_id)
+            for tab in self.query(ChapterTab)
+        )
 
     def save_all(self, notify: bool = True) -> bool:
         """Черновики всех вкладок; False, если хоть один не записан."""

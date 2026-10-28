@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Container
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from io import TextIOWrapper
@@ -97,8 +98,54 @@ def lock_data_dir(root: Path) -> TextIOWrapper:
     return f
 
 
+def _trash(src: Path, dest_dir: Path, name: str) -> Path:
+    """src -> dest_dir/<name>-<время>[-N]; путь в корзине."""
+    if not src.is_dir():
+        raise FileNotFoundError(f"Папки {src} нет")
+    now = datetime.now()  # noqa: DTZ005 локальное время, как в именах версий
+    stem = f"{name}-{now.strftime('%Y-%m-%dT%H-%M-%S')}"
+    dest, n = dest_dir / stem, 1
+    # replace на занятую папку ведёт себя по-разному в разных ОС
+    while dest.exists():
+        n += 1
+        dest = dest_dir / f"{stem}-{n}"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    os.replace(src, dest)
+    log.info("%s перенесена в корзину: %s", src, dest)
+    return dest
+
+
 def _dump(data: object) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def _opt(value: object, kind: type) -> bool:
+    return value is None or isinstance(value, kind)
+
+
+def _check_chapter(chapter: ChapterMeta) -> None:
+    """ValueError, если в chapter.json поле не того типа: иначе упадёт уже UI."""
+    merge = chapter.last_merge
+    for v in chapter.versions:
+        if not (
+            all(isinstance(s, str) for s in (v.file, v.title, v.created, v.comment))
+            and v.source in get_args(Source.__value__)
+            and all(_opt(s, str) for s in (v.site_rev, v.author, v.author_name))
+            and _opt(v.site_num, int)
+            and not isinstance(v.site_num, bool)
+        ):
+            raise ValueError(f"версия {v!r}")
+    if not (
+        isinstance(chapter.title, str)
+        and _opt(chapter.base, str)
+        and _opt(chapter.restored, str)
+        and (
+            merge is None
+            or isinstance(merge, dict)
+            and all(isinstance(s, str) for s in (*merge, *merge.values()))
+        )
+    ):
+        raise ValueError("поля главы")
 
 
 class ChapterStorage:
@@ -110,28 +157,46 @@ class ChapterStorage:
 
     def __init__(self, root: Path) -> None:
         self.fics = root / "fics"
+        self.trash = root / "trash"
+        # shortcut: чтение-правка-запись fic.json и chapter.json без блокировки,
+        # async-воркеры её не прервут; нужен lock, если звать из @work(thread=True)
+
+    def _fic(self, fic_id: str) -> Path:
+        # id с сайта идут в путь: "../" не должен выйти за пределы fics/
+        if not fic_id.isdecimal():
+            raise ValueError(f"Недопустимый id работы {fic_id!r}")
+        return self.fics / fic_id
 
     def _chapter(self, fic_id: str, chapter_id: str) -> Path:
-        return self.fics / fic_id / chapter_id
+        if not chapter_id.removeprefix("new-").isdecimal():
+            raise ValueError(f"Недопустимый id главы {chapter_id!r}")
+        return self._fic(fic_id) / chapter_id
 
     def write_fic(self, fic: Fic, role: Role) -> None:
-        _write(
-            self.fics / fic.id / "fic.json",
-            _dump(
-                {
-                    "title": fic.title,
-                    "role": role,
-                    "readonly": fic.readonly,
-                    "chapters": [asdict(ch) for ch in fic.chapters],
-                }
-            ),
+        path = self._fic(fic.id) / "fic.json"
+        text = _dump(
+            {
+                "title": fic.title,
+                "role": role,
+                "readonly": fic.readonly,
+                "chapters": [asdict(ch) for ch in fic.chapters],
+            }
         )
+        # при входе пишется каждая работа: тот же список - без лишнего fsync
+        try:
+            if _read(path) == text:
+                return
+        except OSError, ValueError:
+            pass
+        _write(path, text)
 
     def read_fic(self, fic_id: str) -> tuple[Fic, Role]:
-        return self._read_fic(self.fics / fic_id / "fic.json")
+        return self._read_fic(self._fic(fic_id) / "fic.json")
 
-    def read_fics(self) -> tuple[list[tuple[Fic, Role]], list[str]]:
-        """Фанфики из fic.json для офлайн-режима: [(фанфик, роль)] и ошибки.
+    def read_fics(
+        self, skip: Container[str] = ()
+    ) -> tuple[list[tuple[Fic, Role]], list[str]]:
+        """Фанфики из fic.json, кроме skip: [(фанфик, роль)] и ошибки.
 
         Повреждённый fic.json пропускается, чтобы не прятать остальные фанфики;
         его ошибку показывает UI.
@@ -139,6 +204,9 @@ class ChapterStorage:
         fics: list[tuple[Fic, Role]] = []
         errors: list[str] = []
         for path in sorted(self.fics.glob("*/fic.json")):
+            # чужая папка: с её id упали бы _fic() и списки глав
+            if not path.parent.name.isdecimal() or path.parent.name in skip:
+                continue
             try:
                 fics.append(self._read_fic(path))
             except OSError, ValueError:
@@ -175,7 +243,10 @@ class ChapterStorage:
         try:
             data = json.loads(_read(path))
             versions = [Version(**v) for v in data.pop("versions")]
-            return ChapterMeta(**data, versions=versions)
+            # лишний ключ - повреждение: иначе запись потеряла бы поля новой версии
+            chapter = ChapterMeta(**data, versions=versions)
+            _check_chapter(chapter)
+            return chapter
         except (ValueError, TypeError, KeyError, AttributeError) as e:
             raise ValueError(f"Файл {path} повреждён") from e
 
@@ -189,11 +260,10 @@ class ChapterStorage:
     def _write_chapter(
         self, fic_id: str, chapter_id: str, chapter: ChapterMeta
     ) -> None:
-        data = asdict(chapter)
-        # у site и publish null осмыслен (site_rev последней ревизии), у manual полей нет
-        for v in data["versions"]:
-            if v["source"] == "manual":
-                del v["site_rev"], v["site_num"], v["author"], v["author_name"]
+        # нет поля и null читаются одинаково - как значение по умолчанию
+        data = asdict(
+            chapter, dict_factory=lambda kv: {k: v for k, v in kv if v is not None}
+        )
         _write(self._chapter(fic_id, chapter_id) / "chapter.json", _dump(data))
 
     def set_title(self, fic_id: str, chapter_id: str, title: str) -> None:
@@ -226,12 +296,18 @@ class ChapterStorage:
         chapter = self._load_chapter(fic_id, chapter_id, title)
         now = datetime.now()  # noqa: DTZ005 локальное время без пояса, как даты на сайте
         versions = self._chapter(fic_id, chapter_id) / "versions"
+        versions.mkdir(parents=True, exist_ok=True)
         stem = now.strftime("%Y-%m-%dT%H-%M-%S")
         file, n = f"{stem}.txt", 1
         # несколько снимков за секунду: синхронизация скачивает ревизии пачкой
-        while (versions / file).exists():
-            n += 1
-            file = f"{stem}-{n}.txt"
+        # "x" занимает имя атомарно, os.replace затёр бы чужой снимок
+        while True:
+            try:
+                (versions / file).open("x").close()
+                break
+            except FileExistsError:
+                n += 1
+                file = f"{stem}-{n}.txt"
         # сначала текст: при сбое останется лишний файл, а не запись без файла
         _write(versions / file, text)
         version = Version(
@@ -269,19 +345,22 @@ class ChapterStorage:
         """
         paths = [
             p
-            for p in (self.fics / fic_id).glob("new-*/draft.txt")
+            for p in self._fic(fic_id).glob("new-*/draft.txt")
             if p.parent.name[4:].isdecimal()
         ]
         # по номеру: new-10 после new-2
         paths.sort(key=lambda p: int(p.parent.name[4:]))
         return [self._slim(fic_id, p.parent.name) for p in paths]
 
-    def local_chapters(self, fic_id: str) -> list[SlimChapterInfo]:
-        """Главы с сайта, у которых есть черновик; название - как у new_chapters."""
+    def local_chapters(
+        self, fic_id: str, skip: Container[str] = ()
+    ) -> list[SlimChapterInfo]:
+        """Главы с сайта, у которых есть черновик, кроме skip; название - как у new_chapters."""
+        # skip отсекаем до _slim: чтение chapter.json - основная цена
         paths = [
             p
-            for p in (self.fics / fic_id).glob("*/draft.txt")
-            if p.parent.name.isdecimal()
+            for p in self._fic(fic_id).glob("*/draft.txt")
+            if p.parent.name.isdecimal() and p.parent.name not in skip
         ]
         paths.sort(key=lambda p: int(p.parent.name))
         return [self._slim(fic_id, p.parent.name) for p in paths]
@@ -292,6 +371,16 @@ class ChapterStorage:
         except OSError, ValueError:
             title = chapter_id
         return SlimChapterInfo(chapter_id, title)
+
+    def trash_chapter(self, fic_id: str, chapter_id: str) -> Path:
+        """Папку главы - в trash/<fic_id>/: файлы не стираются, вернуть можно вручную."""
+        return _trash(
+            self._chapter(fic_id, chapter_id), self.trash / fic_id, chapter_id
+        )
+
+    def trash_fic(self, fic_id: str) -> Path:
+        """Папку работы целиком, с fic.json и new-N, - в trash/."""
+        return _trash(self._fic(fic_id), self.trash, fic_id)
 
     def rename_chapter(self, fic_id: str, old_id: str, new_id: str, title: str) -> None:
         """new-N -> id с сайта после создания главы; глава дописывается в fic.json.
@@ -308,7 +397,7 @@ class ChapterStorage:
         # до записи fic.json: rename на занятую папку ведёт себя по-разному в разных ОС
         if new.exists():
             raise FileExistsError(f"Папка {new} уже существует")
-        fic, role = self._read_fic(self.fics / fic_id / "fic.json")
+        fic, role = self.read_fic(fic_id)
         # глава уже есть, если список успели обновить с сайта
         if all(ch.id != new_id for ch in fic.chapters):
             fic.chapters.append(SlimChapterInfo(new_id, title))

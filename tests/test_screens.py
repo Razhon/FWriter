@@ -28,7 +28,7 @@ from fwriter.screens import (
 )
 from fwriter.screens.api_errors import report_api_error
 from fwriter.screens.chapter import ChapterTab
-from fwriter.screens.main import FIC_SECTIONS, ChapterButton
+from fwriter.screens.main import FIC_SECTIONS, ChapterButton, TrashButton
 from fwriter.secrets import SecretStorage
 
 
@@ -109,6 +109,7 @@ def test_failed_fic_list_keeps_others():
             await pilot.pause()
             titles = [str(c.title) for c in main.query(Collapsible)]
             assert titles == ["author", "gamma"]
+            assert not main.query("#loading")
             # обе ошибки - в одном окне
             errors = [s for s in pilot.app.screen_stack if isinstance(s, ErrorScreen)]
             assert len(errors) == 1
@@ -473,7 +474,7 @@ def test_chapter_tab_saves_draft(tmp_path, monkeypatch):
             async def open_and_type(keys: str) -> ChapterTab:
                 # мышью: фокус на нажатой главе не должен возвращать стартовую вкладку
                 await pilot.click(".chapter_btn")
-                # Pressed должен дойти до MainScreen через OpenChapter и запустить воркер
+                # ChapterButton.Open должен дойти до MainScreen и запустить воркер
                 await pilot.pause()
                 await pilot.app.workers.wait_for_complete()
                 await pilot.pause(0.3)  # подсветка нажатия
@@ -1142,5 +1143,107 @@ def test_relogin_button_shows_attempt(tmp_path, monkeypatch):
             await pilot.pause()
             assert str(btn.render()) == "Повторить вход"
             assert not btn.disabled
+
+    asyncio.run(run())
+
+
+def test_trash_local_chapters(tmp_path, monkeypatch):
+    """Удаляются только локальные главы, со вторым нажатием и при закрытой вкладке.
+
+    Последняя глава работы из "Нет на сайте" уносит в корзину всю работу.
+    """
+    monkeypatch.setattr(TrashButton, "CONFIRM_DELAY", 0.5)
+    api = api_without_fics()
+    storage = ChapterStorage(tmp_path)
+    storage.write_fic(FIC, "author")
+    storage.write_draft(FIC.id, FIC.chapters[0].id, "С сайта.")
+    storage.write_draft(FIC.id, storage.new_chapter_id(FIC.id), "Новая.")
+    storage.write_fic(Fic("2", "Удалённая", []), "author")
+    storage.write_draft("2", "1", "Раз.")
+    storage.write_draft("2", "2", "Два.")
+
+    async def fake_get_fics(role: str) -> list[Fic]:
+        return [FIC] if role == "author" else []
+
+    api.get_fics = fake_get_fics
+    main = MainScreen(api, storage)
+
+    async def press_twice(pilot, btn: ChapterButton) -> None:
+        btn.focus()
+        # подсветка нажатия глушит повтор раньше 0.2 с
+        await pilot.pause(0.3)
+        await pilot.press("x")
+        await pilot.pause(0.3)
+        await pilot.press("x")
+        await pilot.pause()
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            site, new, gone1, gone2 = main.query(ChapterButton)
+            assert site.trash is None
+            assert not site.check_action("trash", ())
+            # стартовая вкладка не закрывается, и F1 на ней некуда вести
+            assert not main.check_action("start_page", ())
+            assert not main.check_action("close_chapter", ())
+            assert new.trash and gone2.trash
+
+            # одно нажатие только спрашивает и само сбрасывается
+            new.focus()
+            await pilot.press("x")
+            await pilot.pause()
+            assert str(new.trash.render()) == "Удалить? X"
+            await pilot.pause(1.0)
+            assert str(new.trash.render()) == "X"
+            assert storage.new_chapters(FIC.id)
+
+            await press_twice(pilot, new)
+            assert not storage.new_chapters(FIC.id)
+            assert chapter_titles(main) == ["Глава", "1", "2"]
+
+            # открытая вкладка не даёт удалить
+            main.open_chapter(gone1.fic, gone1.chapter, "author")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert main.check_action("start_page", ())
+            assert main.check_action("close_chapter", ())
+            await pilot.press("f1")
+            await press_twice(pilot, gone1)
+            assert "закройте вкладку" in list(pilot.app._notifications)[-1].message
+            assert storage.read_draft("2", "1") == "Раз."
+            await main.query_one(TabbedContent).remove_pane(ChapterTab.tab_id("2", "1"))
+
+            await press_twice(pilot, gone1)
+            assert storage.read_draft("2", "1") is None
+            assert storage.read_draft("2", "2") == "Два."
+
+            # работу целиком не даёт удалить вкладка любой её главы
+            (fic_trash,) = [b for b in main.query(TrashButton) if b.chapter is None]
+            main.open_chapter(gone2.fic, gone2.chapter, "author")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.press("f1")
+            fic_trash.action_press()
+            await pilot.pause(0.3)
+            # глав столько, сколько осталось, а не сколько было при построении
+            assert (
+                str(fic_trash.render())
+                == "Удалить работу и её главы (1)? Нажмите ещё раз"
+            )
+            fic_trash.action_press()
+            await pilot.pause()
+            assert "закройте вкладку" in list(pilot.app._notifications)[-1].message
+            assert (tmp_path / "fics" / "2" / "fic.json").exists()
+            await main.query_one(TabbedContent).remove_pane(ChapterTab.tab_id("2", "2"))
+
+            # мышью по крестику; последняя глава - вся работа
+            trash = gone2.trash
+            trash.action_press()
+            await pilot.pause(0.3)
+            trash.action_press()
+            await pilot.pause()
+            assert [fic.id for fic, _ in storage.read_fics()[0]] == [FIC.id]
+            assert len(list((tmp_path / "trash").glob("2-*/fic.json"))) == 1
+            assert chapter_titles(main) == ["Глава"]
+            assert not main.query(".gone_section")
 
     asyncio.run(run())
