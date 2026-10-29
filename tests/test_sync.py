@@ -1,10 +1,13 @@
 import asyncio
 from dataclasses import replace
 
+import pytest
+
 from fwriter.core.api.client import FicbookAPI
+from fwriter.core.api.errors import NetworkError
 from fwriter.core.api.models import Chapter, Revision, RevisionInfo
 from fwriter.core.storage import ChapterStorage
-from fwriter.core.sync import sync_chapter
+from fwriter.core.sync import publish_chapter, sync_chapter
 
 FIC, CH = "1001", "2001"
 MINE = "/home/versions/mine/1001/parts/2001/history"
@@ -26,11 +29,12 @@ class FakeAPI(FicbookAPI):
         super().__init__({})
         self.last = last
         self.revs = revs or [info(1)]
+        self.title = "Глава"
         self.calls: list[str] = []
 
     async def get_chapter(self, fic_id: str, chapter_id: str) -> Chapter:
         self.calls.append("chapter")
-        return Chapter("Глава", self.last.content, True, 1, MINE)
+        return Chapter(self.title, self.last.content, True, 1, MINE)
 
     async def get_chapter_revisions(self, history_url: str) -> list[RevisionInfo]:
         self.calls.append(history_url)
@@ -137,3 +141,146 @@ def test_site_nums_follow_site(tmp_path):
     sync(api, storage)
     nums = [v.site_num for v in storage.read_chapter(FIC, CH).versions]
     assert nums == [1, 2]
+
+
+class SavingAPI(FakeAPI):
+    """save_chapter создаёт на сайте новую последнюю правку."""
+
+    def __init__(self, last: Revision) -> None:
+        super().__init__(last)
+        self.sent: list[tuple[str, str, str]] = []
+
+    async def save_chapter(self, fic_id, chapter_id, content, title, base) -> None:
+        self.sent.append((content, title, base))
+        if content != self.last.content:
+            self.last = rev(content, "2026-10-28T12:00:00")
+            self.revs = [info(len(self.revs) + 1), *self.revs]
+
+
+def publish(api: FakeAPI, storage: ChapterStorage):
+    return asyncio.run(publish_chapter(api, storage, FIC, CH, "Глава"))
+
+
+def test_publish_sends_and_moves_base(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    api = SavingAPI(rev("Старое."))
+    sync(api, storage)
+    storage.write_draft(FIC, CH, "Новое.")
+
+    published = publish(api, storage)
+    assert api.sent == [("Новое.", "Глава", "Старое.")]
+    assert published.rev is not None and published.rev.site_num == 2
+    meta = storage.read_chapter(FIC, CH)
+    assert meta.base == published.rev.file
+    assert [v.source for v in meta.versions] == ["site", "publish", "site"]
+    assert storage.read_draft(FIC, CH) == "Новое."
+
+
+class HistoryDownAPI(SavingAPI):
+    """После отправки история не отвечает."""
+
+    async def get_chapter_revisions(self, history_url: str) -> list[RevisionInfo]:
+        if self.sent:
+            raise NetworkError()
+        return await super().get_chapter_revisions(history_url)
+
+
+def test_publish_survives_history_failure(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    api = HistoryDownAPI(rev("Старое."))
+    sync(api, storage)
+    storage.write_draft(FIC, CH, "Новое.")
+
+    published = publish(api, storage)
+    assert len(api.sent) == 1
+    assert (published.first.kind, published.error, published.after) == (
+        "same",
+        None,
+        None,
+    )
+    assert storage.read_draft(FIC, CH) == "Новое."
+
+
+def test_publish_title_only_keeps_base(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    api = SavingAPI(rev("Текст."))
+    sync(api, storage)
+    meta = storage.read_chapter(FIC, CH)
+    storage.write_chapter(FIC, CH, replace(meta, title="Новое"))
+    published = publish(api, storage)
+    assert api.sent == [("Текст.", "Новое", "Текст.")] and published.rev is None
+    assert storage.read_chapter(FIC, CH).base == meta.base
+
+
+def test_publish_skips_unchanged_chapter(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    # разметка сайта не проверяется: отправлять всё равно нечего
+    api = SavingAPI(rev("<b>Текст."))
+    sync(api, storage)
+    versions = storage.read_chapter(FIC, CH).versions
+    published = publish(api, storage)
+    assert api.sent == []
+    assert (published.unchanged, published.error) == (True, None)
+    assert storage.read_chapter(FIC, CH).versions == versions
+
+
+@pytest.mark.parametrize(
+    ("draft", "site"), [("Моё.", "Новое."), ("<b>Моё.", "Старое.")]
+)
+def test_publish_stops_on_merge_or_markup(tmp_path, draft: str, site: str):
+    storage = ChapterStorage(tmp_path)
+    api = SavingAPI(rev("Старое."))
+    sync(api, storage)
+    storage.write_draft(FIC, CH, draft)
+    if site != "Старое.":
+        api.last = rev(site, "2026-10-27T10:00:00")
+        api.revs = [info(2), info(1, "9001")]
+
+    published = publish(api, storage)
+    assert api.sent == []
+    if site == "Старое.":
+        assert published.error is not None and published.error.line == 0
+    else:
+        assert published.first.kind == "merge"
+    assert not any(
+        v.source == "publish" for v in storage.read_chapter(FIC, CH).versions
+    )
+
+
+@pytest.mark.parametrize(
+    ("local", "site", "title", "conflict"),
+    [
+        ("Глава", "С сайта", "С сайта", None),  # переименовали только на сайте
+        ("Моё", "Глава", "Моё", None),  # только у меня
+        ("Моё", "С сайта", "Моё", "С сайта"),  # оба, по-разному
+        ("Одно", "Одно", "Одно", None),  # оба одинаково
+    ],
+)
+def test_title_merges_like_text(tmp_path, local, site, title, conflict):
+    storage = ChapterStorage(tmp_path)
+    api = FakeAPI(rev("Текст."))
+    sync(api, storage)
+    storage.set_title(FIC, CH, local)
+    assert storage.shown_title(FIC, CH) == (local, local != "Глава")
+    api.title = site
+
+    synced = sync(api, storage)
+    assert synced.title_conflict == conflict
+    meta = storage.read_chapter(FIC, CH)
+    assert (meta.title, meta.site_title) == (title, site)
+    assert storage.shown_title(FIC, CH) == (title, title != site)
+
+
+def test_site_version_keeps_site_title(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    sync(FakeAPI(rev("Старое.")), storage)
+    storage.set_title(FIC, CH, "Моё")
+    storage.write_draft(FIC, CH, "Моё.")
+    sync(
+        FakeAPI(rev("Новое.", "2026-10-27T10:00:00"), [info(2), info(1, "9001")]),
+        storage,
+    )
+    assert [v.title for v in storage.read_chapter(FIC, CH).versions] == [
+        "Глава",
+        "Глава",
+    ]

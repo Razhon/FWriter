@@ -19,8 +19,9 @@ from fwriter.core.api.errors import (
     UserNotLoggedInError,
 )
 from fwriter.core.api.models import Chapter, Fic, SlimChapterInfo, UserInfo
+from fwriter.core.markup import MarkupError
 from fwriter.core.storage import ChapterStorage, Version
-from fwriter.core.sync import Synced
+from fwriter.core.sync import Published, Synced
 from fwriter.run import FWriterApp, setup_logging
 from fwriter.screens import (
     ConnectingScreen,
@@ -1459,5 +1460,97 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
             assert len(list((tmp_path / "trash").glob("2-*/fic.json"))) == 1
             assert chapter_titles(main) == ["Глава"]
             assert not main.query(".gone_section")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("error", [None, MarkupError(0, 2, "Незакрытый тег <b>")])
+def test_f5_publishes_with_tab_locked(tmp_path, monkeypatch, error):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft("00000000", "00000000", "Текст.")
+    main = MainScreen(api_without_fics(), storage)
+    seen: list[tuple[str, bool]] = []
+
+    async def published(api, storage, fic_id, chapter_id, title) -> Published:
+        tab = main.query_one(ChapterTab)
+        seen.append((storage.read_draft(fic_id, chapter_id), tab.editor.read_only))
+        first = Synced("same", "Текст.!")
+        if error is not None:
+            return Published(first, error)
+        rev = Version("v.txt", "Глава", "site", "2026-10-28T12:00:00", site_num=3)
+        return Published(first, None, first, rev)
+
+    monkeypatch.setattr("fwriter.screens.main.publish_chapter", published)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await type_in_chapter(pilot, main)
+            # первое F5 только спрашивает
+            await pilot.press("f5")
+            await pilot.app.workers.wait_for_complete()
+            assert seen == []
+            assert main.publish_armed is not None
+            await pilot.press("f5")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            # перед отправкой черновик на диске, правки закрыты
+            assert seen == [("Текст.!", True)]
+            editor = main.query_one(ChapterTab).editor
+            assert not editor.read_only
+            messages = [n.message for n in pilot.app._notifications]
+            if error is None:
+                assert "Отправлено (правка №3)" in messages
+            else:
+                assert editor.cursor_location == (0, 2)
+                assert "Ошибка разметки, строка 1: Незакрытый тег <b>" in messages
+
+    asyncio.run(run())
+
+
+def test_footer_order_in_chapter(tmp_path):
+    api = api_without_fics()
+
+    async def fake_get_chapter(fic_id: str, chapter_id: str) -> Chapter:
+        return Chapter("Глава", "Текст.", title_editable=True, status=1, history_url="")
+
+    api.get_chapter = fake_get_chapter
+    main = MainScreen(api, ChapterStorage(tmp_path))
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            shown = [b.key for _, b, *_ in main.active_bindings.values() if b.show]
+            assert shown[:4] == ["f1", "f2", "f5", "ctrl+w"]
+
+    asyncio.run(run())
+
+
+def test_renamed_chapter_marked_on_start_page(tmp_path):
+    api = api_without_fics()
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "Текст.")
+    meta = storage.load_chapter(FIC.id, "00000000", "Глава")
+    storage.write_chapter(FIC.id, "00000000", replace(meta, site_title="Глава"))
+
+    async def fake_get_fics(role: str) -> list[Fic]:
+        return [FIC] if role == "author" else []
+
+    api.get_fics = fake_get_fics
+    main = MainScreen(api, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            await pilot.press("f2", "end", "!", "enter")
+            assert main.query_one(ChapterTab).save()
+            await pilot.pause()
+            [btn] = main.query(ChapterButton)
+            assert str(btn.render()) == "Глава! (название не отправлено)"
+            # пометка серая, как крестик удаления
+            [span] = btn.visual.spans  # type: ignore[union-attr]
+            assert str(span.style) == "$text-muted"
 
     asyncio.run(run())

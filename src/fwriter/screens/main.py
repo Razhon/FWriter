@@ -1,11 +1,12 @@
 import asyncio
 import logging
+import time
 from functools import partial
 from typing import ClassVar
 
 from textual import events, on, work
 from textual.app import ComposeResult
-from textual.binding import Binding, BindingType
+from textual.binding import ActiveBinding, Binding, BindingType
 from textual.containers import Center, Horizontal, VerticalScroll
 from textual.content import Content
 from textual.message import Message
@@ -27,7 +28,7 @@ from ..core.api.errors import FicbookAPIError, NetworkError, UserNotLoggedInErro
 from ..core.api.models import Fic, Role, SlimChapterInfo, can_manage
 from ..core.catalog import plan_fic
 from ..core.storage import DATA_DIR, ChapterMeta, ChapterStorage
-from ..core.sync import sync_chapter
+from ..core.sync import Synced, publish_chapter, sync_chapter
 from .api_errors import report_api_error
 from .chapter import ChapterTab
 
@@ -180,7 +181,18 @@ class ChapterButton(ClickableLabel):
         self.chapter = chapter
         self.role: Role = role
         self.trash = trash
+        self.mark = mark
         super().__init__(chapter.title + mark, classes="chapter_btn")
+
+    def on_mount(self) -> None:
+        self.show_title(self.query_ancestor(StartPageTab).storage)
+
+    def show_title(self, storage: ChapterStorage) -> None:
+        """Название из chapter.json, если глава уже скачана; серым - не отправлено."""
+        shown = storage.shown_title(self.fic.id, self.chapter.id)
+        title, pending = shown or (self.chapter.title, False)
+        note = " (название не отправлено)" if pending else ""
+        self.update(Content.assemble(title + self.mark, (note, "$text-muted")))
 
     def press(self) -> None:
         # крестик только у глав, которых нет на сайте
@@ -531,7 +543,16 @@ class MainScreen(Screen):
         Binding("f1", "start_page", "Начало работы"),
         # priority: у TextArea ctrl+w удаляет слово (это остаётся на ctrl+backspace)
         Binding("ctrl+w", "close_chapter", "Закрыть главу", priority=True),
+        Binding("f5", "publish", "Отправить"),
     ]
+    # footer иначе идёт по цепочке от фокуса: ^w от TextArea встаёт первым
+    FOOTER_ORDER = ("f1", "f2", "f5", "ctrl+w")
+
+    @property
+    def active_bindings(self) -> dict[str, ActiveBinding]:
+        bindings = super().active_bindings
+        rank = {key: i for i, key in enumerate(self.FOOTER_ORDER)}
+        return dict(sorted(bindings.items(), key=lambda kv: rank.get(kv[0], len(rank))))
 
     def __init__(
         self, api: FicbookAPI | None, storage: ChapterStorage | None = None
@@ -541,6 +562,8 @@ class MainScreen(Screen):
         self.storage = storage or ChapterStorage(DATA_DIR)
         # tab_id глав, которые сейчас скачиваются: повторный клик не шлёт второй GET
         self.fetching: set[str] = set()
+        # вкладка и время первого F5: отправляет второе нажатие в ней же
+        self.publish_armed: tuple[ChapterTab, float] | None = None
         super().__init__()
 
     def compose(self) -> ComposeResult:
@@ -557,10 +580,17 @@ class MainScreen(Screen):
             t.active != "start_page" for t in self.query(TabbedContent)
         ):
             return False
+        pane = self.query_one(TabbedContent).active_pane
         if action == "close_chapter":
             # закрытую до конца синхронизации главу повторный клик не открыл бы
-            pane = self.query_one(TabbedContent).active_pane
             return not (isinstance(pane, ChapterTab) and pane.syncing)
+        if action == "publish":
+            return (
+                self.api is not None
+                and isinstance(pane, ChapterTab)
+                and pane.publishable
+                and not pane.syncing
+            )
         return True
 
     def on_tabbed_content_tab_activated(self) -> None:
@@ -570,6 +600,12 @@ class MainScreen(Screen):
         )
         self.refresh_bindings()
         self.show_info()
+
+    def on_chapter_tab_title_saved(self, message: ChapterTab.TitleSaved) -> None:
+        tab = message.tab
+        for btn in self.query(ChapterButton):
+            if (btn.fic.id, btn.chapter.id) == (tab.fic_id, tab.chapter_id):
+                btn.show_title(self.storage)
 
     def on_chapter_tab_info_changed(self, message: ChapterTab.InfoChanged) -> None:
         if message.tab is self.query_one(TabbedContent).active_pane:
@@ -637,6 +673,7 @@ class MainScreen(Screen):
             title_editable=can_manage(role, fic.readonly),
             readonly=fic.readonly,
             syncing=syncing,
+            publishable=syncing and not fic.readonly,
         )
         await tabbed.add_pane(tab)
         show()
@@ -665,17 +702,7 @@ class MainScreen(Screen):
             )
         else:
             text, status = synced.text, synced.status
-            if synced.kind == "ff" and synced.site is not None:
-                v = synced.site
-                self.notify(
-                    f"Обновлено до правки №{v.site_num} ({v.author_name}, {v.created})"
-                )
-            elif synced.kind == "merge":
-                # shortcut: слияния нет до MergeScreen, черновик открывается как есть
-                self.notify(
-                    "На сайте новая правка, слияние пока недоступно",
-                    severity="warning",
-                )
+            self.report_synced(synced)
         finally:
             self.fetching.discard(tab_id)
         if not tab.is_attached:
@@ -684,6 +711,94 @@ class MainScreen(Screen):
             await tabbed.remove_pane(tab_id)
             return
         tab.synced(text, self.read_meta(fic.id, chapter.id, title), status)
+
+    def report_synced(self, synced: Synced) -> None:
+        if synced.title_conflict is not None:
+            self.notify(
+                f"Название изменили и на сайте: «{synced.title_conflict}»",
+                severity="warning",
+            )
+        if synced.kind == "ff" and synced.site is not None:
+            v = synced.site
+            self.notify(
+                f"Обновлено до правки №{v.site_num} ({v.author_name}, {v.created})"
+            )
+        elif synced.kind == "merge":
+            # shortcut: слияния нет до MergeScreen, черновик остаётся как есть
+            self.notify(
+                "На сайте новая правка, слияние пока недоступно", severity="warning"
+            )
+
+    def action_publish(self) -> None:
+        pane = self.query_one(TabbedContent).active_pane
+        if not isinstance(pane, ChapterTab):
+            return
+        armed, self.publish_armed = self.publish_armed, None
+        delay = TrashButton.CONFIRM_DELAY
+        if armed is None or armed[0] is not pane or time.monotonic() - armed[1] > delay:
+            self.publish_armed = (pane, time.monotonic())
+            self.notify("Нажмите F5 ещё раз, чтобы отправить", timeout=delay)
+            return
+        if pane.save():
+            self.publish(pane)
+
+    # пока идёт отправка, правки во вкладке закрыты: черновик равен отправленному тексту
+    @work(group="publish")
+    async def publish(self, tab: ChapterTab) -> None:
+        if self.api is None:
+            return
+        tab.exchanging("Отправляем…")
+        status, error = tab.site_status, None
+        try:
+            published = await publish_chapter(
+                self.api,
+                self.storage,
+                tab.fic_id,
+                tab.chapter_id,
+                tab.title_input.value,
+            )
+        except FicbookAPIError as e:
+            report_api_error(self, e, "Не удалось отправить главу")
+        except OSError, ValueError:
+            log.warning(
+                "глава %s/%s не отправлена", tab.fic_id, tab.chapter_id, exc_info=True
+            )
+            self.notify(
+                "Не удалось отправить главу\nОшибка чтения или записи на диске",
+                severity="error",
+            )
+        else:
+            synced = published.after or published.first
+            status, error = synced.status, published.error
+            self.report_synced(published.first)
+            if published.unchanged:
+                self.notify("Глава не отличается от сайта, отправлять нечего")
+            elif published.after is not None:
+                self.report_synced(published.after)
+                v = published.rev
+                self.notify(
+                    "Отправлено" if v is None else f"Отправлено (правка №{v.site_num})"
+                )
+            elif published.first.kind != "merge" and error is None:
+                self.notify(
+                    "Отправлено, но историю правок перечитать не удалось",
+                    severity="warning",
+                )
+        if not tab.is_attached:
+            return
+        # после ошибки на диске мог остаться текст fast-forward
+        try:
+            text = self.storage.read_draft(tab.fic_id, tab.chapter_id)
+        except OSError, ValueError:
+            text = None
+        meta = self.read_meta(tab.fic_id, tab.chapter_id, tab.title_input.value)
+        tab.synced(tab.editor.text if text is None else text, meta, status)
+        if error is not None:
+            tab.editor.cursor_location = (error.line, error.col)
+            self.notify(
+                f"Ошибка разметки, строка {error.line + 1}: {error.message}",
+                severity="error",
+            )
 
     def read_meta(self, fic_id: str, chapter_id: str, title: str) -> ChapterMeta | None:
         """None: chapter.json повреждён."""

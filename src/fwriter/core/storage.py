@@ -66,6 +66,7 @@ class ChapterMeta:
     base: str | None = None  # файл версии сайта, от которой ведётся черновик
     restored: str | None = None
     history_url: str | None = None  # mine или participated, как дал сайт
+    site_title: str | None = None  # название на сайте при последней синхронизации
     last_merge: LastMerge | None = None
     versions: list[Version] = field(default_factory=list)
 
@@ -172,6 +173,7 @@ def _check_chapter(chapter: ChapterMeta) -> None:
         and _opt(chapter.base, str)
         and _opt(chapter.restored, str)
         and _opt(chapter.history_url, str)
+        and _opt(chapter.site_title, str)
         and (merge is None or _merge_ok(merge))
     ):
         raise ValueError("поля главы")
@@ -300,6 +302,14 @@ class ChapterStorage:
     def set_title(self, fic_id: str, chapter_id: str, title: str) -> None:
         chapter = self.load_chapter(fic_id, chapter_id, title)
         self.write_chapter(fic_id, chapter_id, replace(chapter, title=title))
+
+    def shown_title(self, fic_id: str, chapter_id: str) -> tuple[str, bool] | None:
+        """Локальное название и не отправлено ли оно; None - локальной копии нет."""
+        try:
+            meta = self.read_chapter(fic_id, chapter_id)
+        except OSError, ValueError:
+            return None
+        return meta.title, meta.site_title not in (None, meta.title)
 
     def read_version(self, fic_id: str, chapter_id: str, file: str) -> str:
         return _read(self._chapter(fic_id, chapter_id) / "versions" / file)

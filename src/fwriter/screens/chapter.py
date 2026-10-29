@@ -42,6 +42,13 @@ class ChapterTab(TabPane):
             self.tab = tab
             super().__init__()
 
+    class TitleSaved(Message):
+        """chapter.json главы перезаписан: название могло поменяться."""
+
+        def __init__(self, tab: ChapterTab) -> None:
+            self.tab = tab
+            super().__init__()
+
     def __init__(
         self,
         storage: ChapterStorage,
@@ -53,10 +60,12 @@ class ChapterTab(TabPane):
         title_editable: bool,
         readonly: bool = False,
         syncing: bool = False,
+        publishable: bool = False,
     ) -> None:
         """meta None: chapter.json повреждён, название не сохраняется, чтобы не затереть его.
 
         syncing: идёт синхронизация, правки закрыты до synced().
+        publishable: глава есть на сайте, и её можно отправить по F5.
         """
         self.storage = storage
         self.fic_id = fic_id
@@ -64,6 +73,7 @@ class ChapterTab(TabPane):
         self.title_editable = title_editable
         self.readonly = readonly
         self.syncing = syncing
+        self.publishable = publishable
         self.site_status: int | None = None
         self.save_timer: Timer | None = None
         # ссылки, а не query_one: в on_unmount дочерние виджеты уже сняты
@@ -82,7 +92,9 @@ class ChapterTab(TabPane):
             self.title_input.value = meta.title
         self.title_input.disabled = self.syncing or not self.title_editable
         self.editor.read_only = self.syncing or self.readonly
-        self.editor.load_text(text)
+        # тот же текст не перезагружаем: курсор остался бы в начале
+        if text != self.editor.text:
+            self.editor.load_text(text)
         # TextArea приводит переводы строк к одному виду (и \u2028, \x0c - к \n):
         # без правок такой текст не перезаписываем, при правке предупреждаем
         self.saved_text = self.editor.text
@@ -104,12 +116,24 @@ class ChapterTab(TabPane):
             )
             return None
 
+    def exchanging(self, note: str) -> None:
+        """Правки закрыты до synced(): идёт обмен с сайтом."""
+        self.syncing = True
+        self.editor.read_only = True
+        self.title_input.disabled = True
+        self.status.update(note)
+        self.status.display = True
+        self.refresh_bindings()
+        self.post_message(self.InfoChanged(self))
+
     def synced(
         self, text: str, meta: ChapterMeta | None, status: int | None = None
     ) -> None:
         """Синхронизация кончилась: текст после неё, правки открыты."""
         self.syncing = False
         self.site_status = status
+        # синхронизация берёт название с сайта и отмечает отправленное
+        self.post_message(self.TitleSaved(self))
         self.status.display = False
         self.set_text(text, meta)
         self.refresh_bindings()
@@ -209,6 +233,7 @@ class ChapterTab(TabPane):
             if self.saved_title is not None and title and title != self.saved_title:
                 self.storage.set_title(self.fic_id, self.chapter_id, title)
                 self.saved_title = title
+                self.post_message(self.TitleSaved(self))
         # ValueError: chapter.json повредили, пока вкладка открыта
         except OSError, ValueError:
             log.warning(
