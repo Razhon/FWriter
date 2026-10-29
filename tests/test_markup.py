@@ -9,6 +9,7 @@ from fwriter.core.markup import (
     count,
     dashes,
     ellipsis,
+    fix_tags,
     layout,
     para_style,
     paras_touched,
@@ -401,6 +402,58 @@ def test_typography_all_at_once():
     assert skipped == [5]
 
 
+FIX_TAGS = [
+    (
+        "<center><s><i>Ещ</i></s><i>ё</i><s><i> не.</i></s></center>",
+        "<center><i><s>Ещ</s>ё<s> не.</s></i></center>",
+    ),
+    (
+        "<tab><b>Провал: </b><b><i>Не…</i></b>",
+        "<tab><b>Провал: <i>Не…</i></b>",
+    ),
+    ("<b></b>x<i></i>", "x"),
+    ("<b>a<b>b</b>c</b>", "<b>abc</b>"),
+    # пробел между b или i входит в них, у s остаётся
+    ("<i>один</i> <i>два</i>", "<i>один два</i>"),
+    ("<s>один</s> <s>два</s>", "<s>один</s> <s>два</s>"),
+    ("a<b> </b>b", "a b"),
+    ("<b>a</b>\r<b>b</b>", "<b>a\rb</b>"),
+    # <tab>, сноска и \n - границы, стек на них не меняется
+    ("<b>a</b><tab><b>b</b>", "<b>a</b><tab><b>b</b>"),
+    ("<i>a<footnote><i>b</i></footnote></i>", "<i>a<footnote>b</footnote></i>"),
+    ("<b>a</b><b>b\nc</b><b>d</b>", "<b>ab\ncd</b>"),
+    ("<b>a\n</b>", "<b>a\n</b>"),
+]
+
+
+def _styles(text: str) -> list[tuple[str, frozenset[str]]]:
+    # у пробелов b и i не видно
+    return [
+        (ch, run.style - {"b", "i"} if ch in " \t\r" else run.style)
+        for line in layout(text)
+        for run in line.runs
+        for ch in run.text
+    ]
+
+
+@pytest.mark.parametrize(("text", "want"), FIX_TAGS)
+def test_fix_tags(text: str, want: str):
+    once = apply(text, fix_tags(text))
+    assert once == want
+    assert check(once) is None
+    assert _styles(once) == _styles(text)
+    assert fix_tags(once) == []
+
+
+def test_fix_tags_selection_and_broken_markup():
+    text = "<b>a</b><b>b</b>\n<i>c</i><i>d</i>"
+    assert apply(text, fix_tags(text, (len(text) - 2, len(text)))) == (
+        "<b>a</b><b>b</b>\n<i>cd</i>"
+    )
+    assert fix_tags("<b>a</b><b>b") == []
+    assert fix_tags("x <<b></b>i>y") == []
+
+
 # пометка правок твиков в диффе
 
 
@@ -422,6 +475,7 @@ def test_typography_all_at_once():
         (["Раз.", "  "], ["Раз."], False, "оформление абзацев"),
         (["Раз слово."], ["Раз слова."], False, None),
         (["Раз."], ["Раз."], False, None),
+        (["<b>Раз</b><b>, два</b>"], ["<b>Раз, два</b>"], False, "разметка"),
     ],
 )
 def test_tweak_kind(old, new, last, kind):

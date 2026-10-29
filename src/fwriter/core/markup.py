@@ -698,6 +698,125 @@ def typography(
     return _typography(text, sel, edges=True)
 
 
+# починка тегов: b, i, s заново по стилю каждого символа
+
+_STYLE = ("b", "i", "s")
+_Chunk = tuple[int, int, list[str], list[tuple[str, set[str]]], list[str]]
+
+
+def _top(stack: list[str]) -> list[str]:
+    """b, i, s над последним блоком или сноской: их можно переставлять"""
+    i = len(stack)
+    while i and stack[i - 1] in _STYLE:
+        i -= 1
+    return stack[i:]
+
+
+def _need(stack: list[str]) -> set[str]:
+    top = _top(stack)
+    return set(top) - set(stack[: len(stack) - len(top)])
+
+
+def _chunks(text: str) -> list[_Chunk]:
+    """куски между \\n, <tab>, сноской и блоками"""
+    out: list[_Chunk] = []
+    stack: list[str] = []
+    start, raw = 0, 0
+    top: list[str] = []
+    pieces: list[tuple[str, set[str]]] = []
+    for tag_start, tag_end, name, closing in [
+        *tag_list(text),
+        (len(text), len(text), "", True),
+    ]:
+        for i, part in enumerate(text[raw:tag_start].split("\n")):
+            if i:
+                out.append((start, raw - 1, top, pieces, _top(stack)))
+                start, top, pieces = raw, _top(stack), []
+            if part:
+                pieces.append((part, _need(stack)))
+            raw += len(part) + 1
+        raw = tag_end
+        if name in _STYLE:
+            if closing:
+                _drop_last(stack, name)
+            else:
+                stack.append(name)
+            continue
+        out.append((start, tag_start, top, pieces, _top(stack)))
+        if name in BLOCK or name == "footnote":
+            if closing:
+                _drop_last(stack, name)
+            else:
+                stack.append(name)
+        start, top, pieces = tag_end, _top(stack), []
+    return out
+
+
+def _merge(pieces: list[tuple[str, set[str]]]) -> list[tuple[str, set[str]]]:
+    out: list[tuple[str, set[str]]] = []
+    for s, style in pieces:
+        if out and out[-1][1] == style:
+            out[-1] = (out[-1][0] + s, style)
+        else:
+            out.append((s, set(style)))
+    return out
+
+
+def _retag(start: list[str], pieces: list[tuple[str, set[str]]], end: list[str]) -> str:
+    pieces = _merge(pieces)
+    # пробелы между двумя b или i входят в них; у s зачёркнутый пробел видно
+    for k, (s, style) in enumerate(pieces):
+        if s.strip(" \t\r"):
+            continue
+        prev = pieces[k - 1][1] if k else set(start)
+        nxt = pieces[k + 1][1] if k + 1 < len(pieces) else set(end)
+        for name in ("b", "i"):
+            if name in prev and name in nxt:
+                style.add(name)
+            elif name not in prev and name not in nxt:
+                style.discard(name)
+    pieces = _merge(pieces)
+    out: list[str] = []
+    cur = list(start)
+    for k, (s, style) in enumerate(pieces):
+        while not set(cur) <= style:
+            out.append(f"</{cur.pop()}>")
+
+        def key(name: str, k: int = k) -> tuple[int, int, int]:
+            # снаружи - тег, который держится дольше
+            n = k
+            while n < len(pieces) and name in pieces[n][1]:
+                n += 1
+            at = end.index(name) if name in end else len(end)
+            return -n, at, _STYLE.index(name)
+
+        for name in sorted(style - set(cur), key=key):
+            out.append(f"<{name}>")
+            cur.append(name)
+        out.append(s)
+    while cur != end[: len(cur)]:
+        out.append(f"</{cur.pop()}>")
+    out += (f"<{name}>" for name in end[len(cur) :])
+    return "".join(out)
+
+
+def fix_tags(text: str, sel: tuple[int, int] | None = None) -> list[Edit]:
+    """b, i, s без пустых, разорванных и перепутанных тегов; текст и стили не меняются"""
+    if check(text) is not None:
+        return []
+    scope = _sel_lines(text, sel)
+    starts = _line_starts(text)
+    edits: list[Edit] = []
+    for start, end, top, pieces, close in _chunks(text):
+        if bisect.bisect_right(starts, start) - 1 not in scope:
+            continue
+        new = _retag(top, pieces, close)
+        if new != text[start:end]:
+            edits.append((start, end, new))
+    # склейка текста без тегов между ними может сделать из "<" и буквы новый тег
+    return edits if check(apply(text, edits)) is None else []
+
+
 def _untab(lines: list[str]) -> list[str]:
     return [
         _TAB_AT.sub(lambda m: m.group()[:-5], s, count=1)
@@ -724,4 +843,7 @@ def tweak_kind(old: list[str], new: list[str], last: bool) -> str | None:
         return "типографика"
     if _untab(_typo(old, last)) == _untab(_typo(new, last)):
         return "оформление абзацев, типографика"
+    old_text, new_text = "\n".join(old), "\n".join(new)
+    if apply(old_text, fix_tags(old_text)) == apply(new_text, fix_tags(new_text)):
+        return "разметка"
     return None
