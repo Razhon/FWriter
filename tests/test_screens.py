@@ -465,6 +465,13 @@ async def type_in_chapter(pilot, main: MainScreen, keys: str = "!") -> None:
     await pilot.press(*keys)
 
 
+async def close_tab(pilot, main: MainScreen, button: int = 3) -> None:
+    """Клик по вкладке активной главы, по умолчанию правый - закрыть."""
+    tabbed = main.query_one(TabbedContent)
+    await pilot.click(tabbed.get_tab(tabbed.active), button=button)
+    await pilot.pause()
+
+
 def broken_write_draft(*args) -> None:
     raise OSError("disk full")
 
@@ -521,8 +528,8 @@ def test_chapter_tab_saves_draft(tmp_path, monkeypatch):
             assert tabbed.active == tab.id
 
             # закрытие пишет сразу, не дожидаясь таймера
-            await pilot.press("1", "ctrl+w")
-            await pilot.pause()
+            await pilot.press("1")
+            await close_tab(pilot, main)
             assert not main.query(ChapterTab)
             assert draft() == "Текст.!?1"
 
@@ -607,8 +614,10 @@ def test_click_while_loading_sends_one_request(tmp_path):
             assert tab.title_input.disabled and tab.status.display
             # повторное нажатие переключает на ту же вкладку, закрыть её до конца нельзя
             main.open_chapter(FIC, FIC.chapters[0], "author")
-            await pilot.press("ctrl+w")
+            await close_tab(pilot, main)
             assert len(main.query(ChapterTab)) == 1
+            # клик по вкладке забрал фокус
+            tab.editor.focus()
 
             response.set()
             await pilot.app.workers.wait_for_complete()
@@ -619,8 +628,8 @@ def test_click_while_loading_sends_one_request(tmp_path):
             assert not tab.title_input.disabled and not tab.status.display
 
             # после закрытия глава открывается с диска, без второго запроса
-            await pilot.press("!", "ctrl+w")
-            await pilot.pause()
+            await pilot.press("!")
+            await close_tab(pilot, main)
             await open_chapter(pilot, main)
             assert main.query_one(ChapterTab).editor.text == "!Текст."
         assert fetched == ["00000000"]
@@ -644,7 +653,7 @@ def test_click_while_loading_sends_one_request(tmp_path):
                     author_name="user-1",
                 ),
             ),
-            "Обновлено до правки №2 (user-1, 2026-10-27T10:00:00)",
+            "Обновлено до правки номер 2 (user-1, 2026-10-27T10:00:00)",
         ),
         (Synced("merge", "Текст."), "На сайте новая правка, слияние пока недоступно"),
         (
@@ -823,22 +832,53 @@ def test_close_chapter_keeps_unsaved_tab(tmp_path, monkeypatch):
             with monkeypatch.context() as m:
                 m.setattr(storage, "write_draft", broken_write_draft)
                 await type_in_chapter(pilot, main)
-                await pilot.press("ctrl+w")
-                await pilot.pause()
+                # левый клик вкладку не закрывает
+                await close_tab(pilot, main, button=1)
+                assert main.query(ChapterTab)
+                await close_tab(pilot, main)
                 assert main.query(ChapterTab)
 
             # диск ожил: закрытие пишет черновик и снимает вкладку
-            await pilot.press("ctrl+w")
-            await pilot.pause()
+            await close_tab(pilot, main)
             assert not main.query(ChapterTab)
         assert storage.read_draft("00000000", "00000000") == "Текст.!"
 
     asyncio.run(run())
 
 
+def test_right_click_closes_inactive_tab(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    fic = Fic(
+        "00000000", "Фанфик", [SlimChapterInfo("1", "1"), SlimChapterInfo("2", "2")]
+    )
+    for chapter in fic.chapters:
+        storage.write_draft(fic.id, chapter.id, "Текст.")
+    main = MainScreen(api_without_fics(), storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            for chapter in fic.chapters:
+                main.open_chapter(fic, chapter, "author")
+                await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            tabbed = main.query_one(TabbedContent)
+            first, second = main.query(ChapterTab)
+            assert tabbed.active == second.id
+            await pilot.click(tabbed.get_tab(first), button=3)
+            await pilot.pause()
+            assert list(main.query(ChapterTab)) == [second]
+            # стартовая вкладка правым кликом не закрывается
+            await pilot.click(tabbed.get_tab("start_page"), button=3)
+            await pilot.pause()
+            assert tabbed.active == "start_page"
+
+    asyncio.run(run())
+
+
 def test_open_close_keeps_mixed_newlines(tmp_path):
     storage = ChapterStorage(tmp_path)
-    text = "Текст.\r\nТекст.\nТекст. Текст."
+    text = "Текст.\r\nТекст.\nТекст.\u2028Текст."
     storage.write_draft("00000000", "00000000", text)
     main = MainScreen(api_without_fics(), storage)
 
@@ -846,8 +886,7 @@ def test_open_close_keeps_mixed_newlines(tmp_path):
         async with MainScreenApp(main).run_test() as pilot:
             await pilot.app.workers.wait_for_complete()
             await open_chapter(pilot, main)
-            await pilot.press("ctrl+w")
-            await pilot.pause()
+            await close_tab(pilot, main)
             assert not main.query(ChapterTab)
         # TextArea привёл бы переводы строк к одному виду
         assert storage.read_draft("00000000", "00000000") == text
@@ -1400,7 +1439,6 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
             assert not site.check_action("trash", ())
             # стартовая вкладка не закрывается, и F1 на ней некуда вести
             assert not main.check_action("start_page", ())
-            assert not main.check_action("close_chapter", ())
             assert new.trash and gone2.trash
 
             # одно нажатие только спрашивает и само сбрасывается
@@ -1421,7 +1459,6 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
             assert main.check_action("start_page", ())
-            assert main.check_action("close_chapter", ())
             await pilot.press("f1")
             await press_twice(pilot, gone1)
             assert "закройте вкладку" in list(pilot.app._notifications)[-1].message
@@ -1500,7 +1537,7 @@ def test_f5_publishes_with_tab_locked(tmp_path, monkeypatch, error):
             assert not editor.read_only
             messages = [n.message for n in pilot.app._notifications]
             if error is None:
-                assert "Отправлено (правка №3)" in messages
+                assert "Отправлено (правка номер 3)" in messages
             else:
                 assert editor.cursor_location == (0, 2)
                 assert "Ошибка разметки, строка 1: Незакрытый тег <b>" in messages
@@ -1522,7 +1559,7 @@ def test_footer_order_in_chapter(tmp_path):
             await pilot.app.workers.wait_for_complete()
             await open_chapter(pilot, main)
             shown = [b.key for _, b, *_ in main.active_bindings.values() if b.show]
-            assert shown[:4] == ["f1", "f2", "f5", "ctrl+w"]
+            assert shown[:3] == ["f1", "f2", "f5"]
 
     asyncio.run(run())
 

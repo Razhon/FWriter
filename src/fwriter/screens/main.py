@@ -22,6 +22,7 @@ from textual.widgets import (
     TabPane,
     Tabs,
 )
+from textual.widgets._tabbed_content import ContentTab
 
 from ..core.api.client import FicbookAPI
 from ..core.api.errors import FicbookAPIError, NetworkError, UserNotLoggedInError
@@ -541,12 +542,10 @@ class MainScreen(Screen):
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("f1", "start_page", "Начало работы"),
-        # priority: у TextArea ctrl+w удаляет слово (это остаётся на ctrl+backspace)
-        Binding("ctrl+w", "close_chapter", "Закрыть главу", priority=True),
         Binding("f5", "publish", "Отправить"),
     ]
     # footer иначе идёт по цепочке от фокуса: ^w от TextArea встаёт первым
-    FOOTER_ORDER = ("f1", "f2", "f5", "ctrl+w")
+    FOOTER_ORDER = ("f1", "f2", "f5")
 
     @property
     def active_bindings(self) -> dict[str, ActiveBinding]:
@@ -576,14 +575,11 @@ class MainScreen(Screen):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
         # на стартовой вкладке F1 некуда переходить, а закрыть её нельзя
         # до compose вкладок ещё нет
-        if action in ("start_page", "close_chapter") and not any(
+        if action == "start_page" and not any(
             t.active != "start_page" for t in self.query(TabbedContent)
         ):
             return False
         pane = self.query_one(TabbedContent).active_pane
-        if action == "close_chapter":
-            # закрытую до конца синхронизации главу повторный клик не открыл бы
-            return not (isinstance(pane, ChapterTab) and pane.syncing)
         if action == "publish":
             return (
                 self.api is not None
@@ -721,7 +717,7 @@ class MainScreen(Screen):
         if synced.kind == "ff" and synced.site is not None:
             v = synced.site
             self.notify(
-                f"Обновлено до правки №{v.site_num} ({v.author_name}, {v.created})"
+                f"Обновлено до правки номер {v.site_num} ({v.author_name}, {v.created})"
             )
         elif synced.kind == "merge":
             # shortcut: слияния нет до MergeScreen, черновик остаётся как есть
@@ -777,7 +773,7 @@ class MainScreen(Screen):
                 self.report_synced(published.after)
                 v = published.rev
                 self.notify(
-                    "Отправлено" if v is None else f"Отправлено (правка №{v.site_num})"
+                    "Отправлено" if v is None else f"Отправлено (правка номер {v.site_num})"
                 )
             elif published.first.kind != "merge" and error is None:
                 self.notify(
@@ -828,12 +824,16 @@ class MainScreen(Screen):
         tabs = self.query(ChapterTab)
         return all([tab.save(notify) for tab in tabs])  # noqa: C419 сохранить все, а не до первой ошибки
 
-    # не записанный черновик остаётся открытым: после закрытия текст был бы только в памяти
-    async def action_close_chapter(self) -> None:
+    # пкм по вкладке закрывает главу: ctrl+w нужен TextArea, alt+backspace приходит как он
+    async def on_click(self, event: events.Click) -> None:
+        if event.button != 3 or not isinstance(event.widget, ContentTab):
+            return
         tabbed = self.query_one(TabbedContent)
-        pane = tabbed.active_pane
-        if isinstance(pane, ChapterTab) and pane.save():
-            await tabbed.remove_pane(tabbed.active)
+        pane = tabbed.get_pane(event.widget)
+        # закрытую до конца синхронизации главу повторный клик не открыл бы;
+        # не записанный черновик остаётся открытым: после закрытия текст был бы только в памяти
+        if isinstance(pane, ChapterTab) and not pane.syncing and pane.save():
+            await tabbed.remove_pane(pane.id or "")
 
     async def on_unmount(self) -> None:
         if self.api:
