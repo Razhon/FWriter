@@ -7,6 +7,7 @@ from textual.app import App
 from textual.geometry import Region
 from textual.widgets import Collapsible, Input, Label, Log, TabbedContent
 from textual.widgets._collapsible import CollapsibleTitle
+from textual.widgets.text_area import Selection
 
 from fwriter.core.api.client import FicbookAPI
 from fwriter.core.api.errors import (
@@ -1639,5 +1640,47 @@ def test_renamed_chapter_marked_on_start_page(tmp_path):
             # пометка серая, как крестик удаления
             [span] = btn.visual.spans  # type: ignore[union-attr]
             assert str(span.style) == "$text-muted"
+
+    asyncio.run(run())
+
+
+def test_tag_keys_in_editor(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "раз два")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            editor = main.query_one(ChapterTab).editor
+            assert main.focused is editor
+            await pilot.press("tab")
+            assert editor.text == "<tab>раз два"
+            editor.selection = Selection((0, 5), (0, 8))
+            await pilot.press("ctrl+b")
+            assert editor.text == "<tab><b>раз</b> два"
+            await pilot.press("end", "alt+i", "x")
+            assert editor.text == "<tab><b>раз</b> два<i>x</i>"
+            # каждая вставка тегов - один шаг отмены
+            await pilot.press("ctrl+z", "ctrl+z")
+            assert editor.text == "<tab><b>раз</b> два"
+            await pilot.press("ctrl+z")
+            assert editor.text == "<tab>раз два"
+            editor.load_text("раз\nдва")
+            editor.select_all()
+            await pilot.press("ctrl+t")
+            assert editor.text == "<s>раз</s>\n<s>два</s>"
+            await pilot.press("ctrl+z")
+            assert editor.text == "раз\nдва"
+            # подсвечены только теги читателя
+            editor.load_text("<b>a</b><u>b</u>")
+            styled = {editor.text[s.start : s.end] for s in editor.get_line(0).spans}
+            assert styled == {"<b>", "</b>"}
+            # только для чтения tab переводит фокус
+            editor.read_only = True
+            await pilot.press("tab")
+            assert editor.text == "<b>a</b><u>b</u>"
+            assert main.focused is not editor
 
     asyncio.run(run())

@@ -10,7 +10,6 @@ from typing import ClassVar
 from platformdirs import user_log_dir
 from textual import work
 from textual.app import App
-from textual.binding import BindingType
 from textual.screen import Screen
 
 from .core.api.client import FicbookAPI
@@ -24,8 +23,6 @@ log = logging.getLogger(__name__)
 
 
 class FWriterApp(App):
-    BINDINGS: ClassVar[list[BindingType]] = [("ctrl+c", "quit", "Exit app")]
-
     MODES: ClassVar[dict[str, str | Callable[[], Screen]]] = {
         "login": LoginScreen,
         "connecting": ConnectingScreen,
@@ -50,6 +47,10 @@ class FWriterApp(App):
             "Нажмите Ctrl+Q ещё раз, чтобы выйти без сохранения",
             severity="error",
         )
+
+    # ctrl+c у Textual вместо выхода; в TextArea это копирование
+    def action_help_quit(self) -> None:
+        self.notify("Выход - Ctrl+Q")
 
     def on_mount(self) -> None:
         self.login_saved_or_ask()

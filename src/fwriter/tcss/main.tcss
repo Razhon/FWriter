@@ -106,3 +106,28 @@ Collapsible > Contents {
     margin: 0 1;
     color: $footer-foreground;
 }
+
+/* теги, которые видит читатель */
+ChapterEditor > .chapter-editor--b {
+    color: $warning;
+}
+
+ChapterEditor > .chapter-editor--i {
+    color: $success;
+}
+
+ChapterEditor > .chapter-editor--s {
+    color: $error;
+}
+
+ChapterEditor > .chapter-editor--center, ChapterEditor > .chapter-editor--right {
+    color: $primary;
+}
+
+ChapterEditor > .chapter-editor--footnote {
+    color: $secondary;
+}
+
+ChapterEditor > .chapter-editor--tab {
+    color: $accent;
+}

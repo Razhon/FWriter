@@ -256,7 +256,8 @@ def _hide_spaces(line: Line) -> None:
     line.runs = runs
 
 
-def _tag_list(text: str) -> list[tuple[int, int, str, bool]]:
+def tag_list(text: str) -> list[tuple[int, int, str, bool]]:
+    """теги, которые видит читатель: начало, конец, имя, закрывающий"""
     tags = _Tags(text)
     tags.feed(text)
     tags.close()
@@ -268,7 +269,7 @@ def layout(text: str) -> list[Line]:
     state = _Layout()
     state.new_line(0, 0)
     raw = 0
-    for start, end, name, closing in _tag_list(text):
+    for start, end, name, closing in tag_list(text):
         state.text(text[raw:start], raw)
         state.tag(start, end, name, closing)
         raw = end
@@ -337,6 +338,24 @@ def paras_touched(text: str, edits: list[Edit]) -> int:
     return len({bisect.bisect_right(starts, i) - 1 for i in at})
 
 
+def wrap(text: str, sel: tuple[int, int], tag: str) -> list[Edit]:
+    """пара тегов на месте курсора или вокруг выделения, в каждой строке отдельно"""
+    a, b = sel
+    if a == b:
+        return [(a, a, f"<{tag}></{tag}>")]
+    edits: list[Edit] = []
+    starts = _line_starts(text)
+    first = bisect.bisect_right(starts, a) - 1
+    for start in starts[first : bisect.bisect_right(starts, b)]:
+        end = text.find("\n", start)
+        end = len(text) if end < 0 else end
+        lo, hi = max(a, start), min(b, end)
+        # пустые строки и кусок выделения из одного перевода строки не оборачиваем
+        if lo < hi:
+            edits += [(lo, lo, f"<{tag}>"), (hi, hi, f"</{tag}>")]
+    return edits
+
+
 def _span(text: str, sel: tuple[int, int] | None) -> tuple[int, int]:
     """выделение, которое кончается в начале строки, эту строку не касается"""
     if sel is None:
@@ -367,7 +386,7 @@ _TAB_AT = re.compile(r"[ \t]*(?:<[bis]>)*<tab>")
 
 def _units(text: str) -> list[_Unit]:
     """сырые строки, склеенные по \\n внутри блока или сноски"""
-    tags = _tag_list(text)
+    tags = tag_list(text)
     units: list[_Unit] = []
     blocks = 0
     footnote = False
@@ -461,7 +480,7 @@ class _Plain:
 
 
 def _plain_lines(text: str, sel: tuple[int, int] | None) -> list[_Plain]:
-    tags = _tag_list(text)
+    tags = tag_list(text)
     scope = _sel_lines(text, sel)
     out: list[_Plain] = []
     footnote = False

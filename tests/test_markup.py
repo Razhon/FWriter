@@ -19,6 +19,7 @@ from fwriter.core.markup import (
     to_screen,
     tweak_kind,
     typography,
+    wrap,
 )
 
 VALID = (
@@ -425,3 +426,16 @@ def test_typography_all_at_once():
 )
 def test_tweak_kind(old, new, last, kind):
     assert tweak_kind(old, new, last) == kind
+
+
+@pytest.mark.parametrize(
+    ("text", "sel", "expected"),
+    [
+        ("ab", (1, 1), "a<b></b>b"),
+        ("abc", (0, 2), "<b>ab</b>c"),
+        # каждая строка отдельно, пустые и хвост из одного \n не оборачиваются
+        ("ab\n\ncd\nef", (1, 7), "a<b>b</b>\n\n<b>cd</b>\nef"),
+    ],
+)
+def test_wrap(text: str, sel: tuple[int, int], expected: str):
+    assert apply(text, wrap(text, sel, "b")) == expected
