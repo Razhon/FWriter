@@ -1,0 +1,44 @@
+#merge_head {
+    padding: 0 1;
+    text-style: bold;
+}
+
+#merge_revs {
+    padding: 0 1;
+    max-height: 6;
+    color: $text-muted;
+}
+
+#merge_body {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#merge_body ParagraphDiff {
+    margin-top: 1;
+    padding: 0 1;
+    border-left: thick $panel;
+}
+
+#merge_done {
+    margin: 0 1;
+}
+
+ManualScreen {
+    align: center middle;
+}
+
+#manual {
+    width: 90%;
+    height: 80%;
+    border: thick $background 80%;
+    background: $surface;
+}
+
+#manual_title {
+    margin: 0 1;
+}
+
+#manual ChapterEditor {
+    height: 1fr;
+}

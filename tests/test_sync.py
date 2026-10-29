@@ -12,8 +12,16 @@ from fwriter.core.api.models import (
     RevisionInfo,
     SlimChapterInfo,
 )
+from fwriter.core.merge import Hunk, Manual
 from fwriter.core.storage import ChapterMeta, ChapterStorage
-from fwriter.core.sync import publish_chapter, sync_chapter
+from fwriter.core.sync import (
+    finish_merge,
+    load_merge,
+    postpone_merge,
+    publish_chapter,
+    start_merge,
+    sync_chapter,
+)
 
 FIC, CH = "1001", "2001"
 MINE = "/home/versions/mine/1001/parts/2001/history"
@@ -335,7 +343,7 @@ def test_create_chapter_deleted_on_site(tmp_path):
 
     published = asyncio.run(publish_chapter(api, storage, FIC, CH, "Глава", True))
     assert api.created == [("Глава", "Новое.")]
-    assert published.created == "2002" and published.renamed
+    assert published.created == "2002" and not published.stranded
     assert not (tmp_path / "fics" / FIC / CH).exists()
     assert storage.read_fic(FIC)[0].chapters == [SlimChapterInfo("2002", "Глава")]
     meta = storage.read_chapter(FIC, "2002")
@@ -356,7 +364,7 @@ def test_create_chapter_keeps_draft_when_rename_fails(tmp_path):
 
     published = asyncio.run(publish_chapter(api, storage, FIC, "new-1", "Глава", True))
     assert api.created == [("Глава", "Новое.")]
-    assert published.created == "2002" and not published.renamed
+    assert published.created == "2002" and published.stranded
     assert storage.read_draft(FIC, "new-1") == "Новое."
 
 
@@ -367,3 +375,156 @@ def test_create_chapter_stops_on_markup(tmp_path):
     api = CreatingAPI()
     published = asyncio.run(publish_chapter(api, storage, FIC, "new-1", "Глава", True))
     assert published.error is not None and api.created == []
+
+
+class CreatedHistoryDownAPI(CreatingAPI):
+    async def get_chapter_revisions(self, history_url: str) -> list[RevisionInfo]:
+        raise NetworkError()
+
+
+def test_created_chapter_without_history_can_merge(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_fic(Fic(FIC, "Работа", [], False), "author")
+    storage.write_chapter(FIC, "new-1", ChapterMeta("Глава"))
+    storage.write_draft(FIC, "new-1", "Было.\n\nОбщее.")
+    api = CreatedHistoryDownAPI()
+    published = asyncio.run(publish_chapter(api, storage, FIC, "new-1", "Глава", True))
+    assert published.created == "2002" and published.after is None
+    # base - отправленный текст, хотя история не прочиталась
+    meta = storage.read_chapter(FIC, "2002")
+    assert meta.base is not None
+    assert storage.read_version(FIC, "2002", meta.base) == "Было.\n\nОбщее."
+
+    # соавтор правит на сайте, я - в черновике
+    storage.write_draft(FIC, "2002", "Моё.\n\nОбщее.")
+    site = FakeAPI(rev("Было.\n\nСайт.", "2026-10-30T10:00:00"))
+    synced = asyncio.run(sync_chapter(site, storage, FIC, "2002", "Глава", False))
+    assert synced.kind == "merge" and synced.site is not None
+    merge, parts, _ = start_merge(storage, FIC, "2002", "Глава", synced.site)
+    assert merge.base == meta.base
+    text = finish_merge(storage, FIC, "2002", "Глава", merge, parts, {})
+    assert text == "Моё.\n\nСайт."
+
+
+def test_merge_without_base_starts_from_empty(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC, CH, "Моё.")  # chapter.json до исправления: base нет
+    synced = sync(FakeAPI(rev("Сайт.")), storage)
+    assert synced.kind == "merge" and synced.site is not None
+
+    merge, parts, _ = start_merge(storage, FIC, CH, "Глава", synced.site)
+    assert merge.base is None
+    # вся глава - один конфликт "сайт против моего"
+    assert [p.kind for p in parts if isinstance(p, Hunk)] == ["conflict"]
+    assert postpone_merge(storage, FIC, CH, "Глава", merge, parts, {})
+    text = finish_merge(storage, FIC, CH, "Глава", merge, parts, {0: "site"})
+    assert text == "Сайт."
+    assert storage.read_chapter(FIC, CH).base == synced.site.file
+
+
+def test_merge_start_finish_and_review(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    sync(FakeAPI(rev("Было.\n\nОбщее.")), storage)
+    storage.write_draft(FIC, CH, "Моё.\n\nОбщее.")
+    api = FakeAPI(
+        rev("Сайт.\n\nОбщее!", "2026-10-27T10:00:00"), [info(2), info(1, "9001")]
+    )
+    synced = sync(api, storage)
+    assert synced.site is not None
+    # в шапку - только правки новее base
+    assert [r.num for r in synced.revs] == [2]
+
+    merge, parts, choices = start_merge(storage, FIC, CH, "Глава", synced.site)
+    assert choices == {}
+    # Esc и снова: второго снимка черновика нет, решения вернулись
+    base = storage.read_chapter(FIC, CH).base
+    assert postpone_merge(storage, FIC, CH, "Глава", merge, parts, {0: "site"})
+    assert storage.read_draft(FIC, CH) == "Моё.\n\nОбщее."
+    assert storage.read_chapter(FIC, CH).base == base
+    merge, _, choices = start_merge(storage, FIC, CH, "Глава", synced.site)
+    assert choices == {0: "site"}
+    assert storage.read_version(FIC, CH, merge.mine) == "Моё.\n\nОбщее."
+
+    text = finish_merge(storage, FIC, CH, "Глава", merge, parts, {0: Manual("Оба.")})
+    # Esc в F4 после "Готово" решений не меняет
+    assert not postpone_merge(storage, FIC, CH, "Глава", merge, parts, {0: "site"})
+    assert text == storage.read_draft(FIC, CH) == "Оба.\n\nОбщее!"
+    meta = storage.read_chapter(FIC, CH)
+    assert meta.base == synced.site.file
+
+    # F4: решения возвращаются, правка после слияния сохраняется версией
+    storage.write_draft(FIC, CH, "Правка после слияния.")
+    loaded = load_merge(storage, FIC, CH)
+    assert loaded is not None and loaded != "outdated"
+    merge, parts, choices, site = loaded
+    assert choices == {0: Manual("Оба.")}
+    assert site == synced.site
+    count = len(meta.versions)
+    finish_merge(storage, FIC, CH, "Глава", merge, parts, {0: "mine"})
+    meta = storage.read_chapter(FIC, CH)
+    assert storage.read_draft(FIC, CH) == "Моё.\n\nОбщее!"
+    assert len(meta.versions) == count + 1
+    assert storage.read_version(FIC, CH, meta.versions[-1].file) == (
+        "Правка после слияния."
+    )
+
+    # решение не на своём блоке: отбрасываются все
+    assert meta.last_merge is not None
+    meta.last_merge.choices[0].start = 5
+    storage.write_chapter(FIC, CH, meta)
+    loaded = load_merge(storage, FIC, CH)
+    assert loaded is not None and loaded != "outdated" and loaded[2] == {}
+
+
+def test_postponed_merge_review_takes_new_edits(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    sync(FakeAPI(rev("Было.\n\nОбщее.")), storage)
+    storage.write_draft(FIC, CH, "Моё.\n\nОбщее.")
+    synced = sync(FakeAPI(rev("Сайт.\n\nОбщее!", "2026-10-27T10:00:00")), storage)
+    assert synced.site is not None
+    merge, parts, _ = start_merge(storage, FIC, CH, "Глава", synced.site)
+    assert postpone_merge(storage, FIC, CH, "Глава", merge, parts, {0: "site"})
+    # F4 без правок: тот же снимок и решения
+    loaded = load_merge(storage, FIC, CH)
+    assert loaded is not None and loaded != "outdated"
+    assert loaded[0].mine == merge.mine and loaded[2] == {0: "site"}
+
+    # правка после Esc: F4 берёт новый снимок, иначе "Готово" выкинуло бы её
+    storage.write_draft(FIC, CH, "Моё.\n\nОбщее.\n\nЕщё.")
+    loaded = load_merge(storage, FIC, CH)
+    assert loaded is not None and loaded != "outdated"
+    merge, parts, choices, _ = loaded
+    assert choices == {}
+    text = finish_merge(storage, FIC, CH, "Глава", merge, parts, {0: "site"})
+    assert text == "Сайт.\n\nОбщее!\n\nЕщё."
+
+
+def test_load_merge_outdated_after_fast_forward(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    sync(FakeAPI(rev("Было.\n\nОбщее.")), storage)
+    storage.write_draft(FIC, CH, "Моё.\n\nОбщее.")
+    synced = sync(FakeAPI(rev("Сайт.\n\nОбщее!", "2026-10-27T10:00:00")), storage)
+    assert synced.site is not None
+    merge, parts, _ = start_merge(storage, FIC, CH, "Глава", synced.site)
+    finish_merge(storage, FIC, CH, "Глава", merge, parts, {0: "site"})
+    # черновик равен base: новая правка сайта - fast-forward
+    ff = sync(FakeAPI(rev("Сайт.\n\nЕщё.", "2026-10-28T10:00:00")), storage)
+    assert ff.kind == "ff"
+    assert load_merge(storage, FIC, CH) == "outdated"
+
+
+class CreateDownAPI(CreatingAPI):
+    async def create_chapter(self, fic_id: str, title: str, content: str) -> str:
+        raise NetworkError()
+
+
+def test_failed_create_leaves_no_base(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_chapter(FIC, "new-1", ChapterMeta("Глава"))
+    storage.write_draft(FIC, "new-1", "Текст.")
+    with pytest.raises(NetworkError):
+        asyncio.run(
+            publish_chapter(CreateDownAPI(), storage, FIC, "new-1", "Глава", True)
+        )
+    # с base вкладка показала бы "как на сайте"
+    assert storage.read_chapter(FIC, "new-1").base is None

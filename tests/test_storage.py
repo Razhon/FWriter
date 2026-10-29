@@ -294,10 +294,10 @@ def test_last_merge_roundtrip(tmp_path):
         encoding="utf-8",
     )
     merge = LastMerge(
-        "a",
-        "b",
-        "c",
-        [MergeChoice(1, 0, "site"), MergeChoice(3, 5, "manual", "")],
+        base="a",
+        site="b",
+        mine="c",
+        choices=[MergeChoice(1, 0, "site"), MergeChoice(3, 5, "manual", "")],
     )
     assert storage.read_chapter("1", "2").last_merge == merge
 

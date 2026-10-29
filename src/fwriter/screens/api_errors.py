@@ -48,3 +48,9 @@ def report_api_error(widget: Widget, e: FicbookAPIError, action: str) -> None:
             widget.app.screen.add(text)
         case _:
             widget.app.push_screen(ErrorScreen(text))
+
+
+def report_disk_error(widget: Widget, e: Exception, action: str, where: str) -> None:
+    """Ошибку диска - человеку; where - id работы и главы для лога."""
+    log.warning("%s: %s", action, where, exc_info=e)
+    widget.notify(f"{action}\nОшибка чтения или записи на диске", severity="error")

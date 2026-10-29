@@ -1,609 +1,33 @@
-import asyncio
 import logging
-import time
-from dataclasses import replace
-from functools import partial
-from typing import ClassVar, Literal
+from typing import ClassVar
 
-from textual import events, on, work
+from textual import events, work
 from textual.app import ComposeResult
 from textual.binding import ActiveBinding, Binding, BindingType
-from textual.containers import Center, Horizontal, VerticalScroll
-from textual.content import Content
-from textual.message import Message
+from textual.containers import Horizontal
 from textual.screen import Screen
-from textual.timer import Timer
-from textual.widget import Widget
-from textual.widgets import (
-    Collapsible,
-    Footer,
-    Label,
-    Rule,
-    TabbedContent,
-    TabPane,
-    Tabs,
-)
-from textual.widgets._tabbed_content import ContentTab
+from textual.widgets import Footer, Label, Tab, TabbedContent, Tabs
 
 from ..core.api.client import FicbookAPI
-from ..core.api.errors import (
-    FicbookAPIError,
-    NetworkError,
-    SiteRejectedError,
-    UserNotLoggedInError,
-)
 from ..core.api.models import Fic, Role, SlimChapterInfo, can_manage
-from ..core.catalog import plan_fic
 from ..core.storage import DATA_DIR, ChapterMeta, ChapterStorage
-from ..core.sync import Synced, publish_chapter, sync_chapter
-from .api_errors import report_api_error
-from .chapter import STATUSES, ChapterTab
-from .menu import MenuScreen
+from .api_errors import report_disk_error
+from .chapter import ChapterTab
+from .start_page import ChapterButton, FicCollapsible, NewChapterButton, StartPageTab
 
 log = logging.getLogger(__name__)
 
-FIC_SECTIONS: list[tuple[Role, str]] = [
-    ("author", "Ваши фанфики"),
-    ("coauthor", "Фанфики доступные вам, как соавтору или сопереводчику"),
-    ("beta", "Фанфики доступные вам, как бете"),
-    ("gamma", "Фанфики доступные вам, как гамме"),
-]
-
-# без сессии и без связи следующие запросы упадут так же
-STOP_LOADING = (UserNotLoggedInError, NetworkError)
-
-
-class ClickableLabel(Label, can_focus=True):
-    """Намеренный отдельный класс от Button, так легче"""
-
-    PRESS_DELAY = 0.2
-
-    DEFAULT_CSS = """
-    ClickableLabel {
-        pointer: pointer;
-        &:focus, &:hover {
-            text-style: underline;
-        }
-        &.-active {
-            text-style: reverse;
-        }
-    }
-    """
-
-    BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("enter", "press", "Press ClickableLabel", show=False)
-    ]
-
-    class Pressed(Message):
-        def __init__(self, clabel: ClickableLabel) -> None:
-            self.clabel: ClickableLabel = clabel
-            super().__init__()
-
-        @property
-        def control(self) -> ClickableLabel:
-            return self.clabel
-
-    # markup выключен по умолчанию, в отличие от Label: названия глав приходят с сайта
-    def __init__(
-        self, label: str, classes: str | None = None, markup: bool = False
-    ) -> None:
-        super().__init__(label, classes=classes, markup=markup)
-
-    async def _on_click(self, event: events.Click) -> None:
-        event.stop()
-        self.action_press()
-
-    def action_press(self) -> None:
-        # пока идёт подсветка нажатия, повторные нажатия игнорируются
-        if self.disabled or not self.display or self.has_class("-active"):
-            return
-        self.add_class("-active")
-        self.set_timer(self.PRESS_DELAY, partial(self.remove_class, "-active"))
-        self.press()
-
-    def press(self) -> None:
-        """Сообщение о нажатии; подклассы шлют свои."""
-        self.post_message(ClickableLabel.Pressed(self))
-
-
-class TrashButton(ClickableLabel):
-    """Перенос в корзину: первое нажатие спрашивает, второе за CONFIRM_DELAY удаляет.
-
-    chapter None - работа целиком.
-    """
-
-    CONFIRM_DELAY = 3.0
-
-    BINDINGS: ClassVar[list[BindingType]] = [Binding("x", "press", "Удалить")]
-
-    class Confirmed(Message):
-        """Второе нажатие: перенести в корзину."""
-
-        def __init__(self, button: TrashButton) -> None:
-            self.button = button
-            super().__init__()
-
-        @property
-        def control(self) -> TrashButton:
-            return self.button
-
-    def __init__(
-        self,
-        fic: Fic,
-        chapter: SlimChapterInfo | None,
-        label: str = "X",
-        prompt: str = "Удалить? X",
-    ) -> None:
-        self.fic = fic
-        self.chapter = chapter
-        self.idle_label = label
-        self.prompt = prompt
-        self.reset_timer: Timer | None = None
-        super().__init__(label, classes="trash_btn")
-
-    def press(self) -> None:
-        """Второе нажатие шлёт Confirmed; первое только меняет надпись."""
-        if self.reset_timer:
-            self.disarm()
-            self.post_message(TrashButton.Confirmed(self))
-            return
-        self.add_class("-armed")
-        # {n} - глав сейчас: часть могли удалить после построения списка
-        n = self.query_ancestor(FicCollapsible).chapter_count()
-        self.update(self.prompt.format(n=n))
-        self.reset_timer = self.set_timer(self.CONFIRM_DELAY, self.disarm)
-
-    def disarm(self) -> None:
-        if self.reset_timer:
-            self.reset_timer.stop()
-            self.reset_timer = None
-        self.remove_class("-armed")
-        self.update(self.idle_label)
-
-
-class ChapterButton(ClickableLabel):
-    BINDINGS: ClassVar[list[BindingType]] = [Binding("x", "trash", "Удалить")]
-
-    class Open(Message):
-        """Нажата глава; открывает MainScreen."""
-
-        def __init__(
-            self, fic: Fic, chapter: SlimChapterInfo, role: Role, on_site: bool
-        ) -> None:
-            self.fic = fic
-            self.chapter = chapter
-            self.role = role
-            self.on_site = on_site
-            super().__init__()
-
-    def __init__(
-        self,
-        fic: Fic,
-        chapter: SlimChapterInfo,
-        role: Role,
-        mark: str = "",
-        trash: TrashButton | None = None,
-    ) -> None:
-        """trash - крестик в строке главы, если её можно удалить."""
-        self.fic = fic
-        self.chapter = chapter
-        self.role: Role = role
-        self.trash = trash
-        self.mark = mark
-        super().__init__(chapter.title + mark, classes="chapter_btn")
-
-    def on_mount(self) -> None:
-        self.show_title(self.query_ancestor(StartPageTab).storage)
-
-    def show_title(self, storage: ChapterStorage) -> None:
-        """Название из chapter.json, если глава уже скачана; серым - не отправлено."""
-        shown = storage.shown_title(self.fic.id, self.chapter.id)
-        title, pending = shown or (self.chapter.title, False)
-        note = " (название не отправлено)" if pending else ""
-        self.update(Content.assemble(title + self.mark, (note, "$text-muted")))
-
-    def press(self) -> None:
-        # крестик только у глав, которых нет на сайте
-        on_site = self.trash is None
-        self.post_message(
-            ChapterButton.Open(self.fic, self.chapter, self.role, on_site)
-        )
-
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
-        # False прячет подсказку в footer у глав с сайта
-        return action != "trash" or self.trash is not None
-
-    def action_trash(self) -> None:
-        if self.trash:
-            self.trash.action_press()
-
-
-class NewChapterButton(ClickableLabel):
-    class Create(Message):
-        """Нажата "Новая глава"; создаёт MainScreen."""
-
-        def __init__(self, button: NewChapterButton) -> None:
-            self.button = button
-            super().__init__()
-
-    def __init__(self, fic: Fic, role: Role) -> None:
-        self.fic = fic
-        self.role: Role = role
-        super().__init__(
-            "[bold]Новая глава ->[/]", classes="new_chapter_btn", markup=True
-        )
-
-    def press(self) -> None:
-        self.post_message(NewChapterButton.Create(self))
-
-
-class FicCollapsible(Collapsible):
-    """Работа в списке; gone_fic - её нет на сайте."""
-
-    def __init__(
-        self, *children: Widget, fic: Fic, role: Role, gone_fic: bool, classes: str
-    ) -> None:
-        self.fic = fic
-        self.role: Role = role
-        self.gone_fic = gone_fic
-        super().__init__(
-            *children,
-            # типизирует title как str, но принимает Content; str разбирается как разметка
-            title=Content(fic.title),  # pyright: ignore[reportArgumentType]
-            # сам Collapsible свернётся только в on_mount, а кадр до него мигнёт прокруткой
-            classes=f"{classes} -collapsed",
-        )
-
-    def chapter_count(self) -> int:
-        return len(self.query(ChapterButton))
-
-
-def chapter_row(
-    fic: Fic, chapter: SlimChapterInfo, role: Role, mark: str = "", trash: bool = False
-) -> Widget:
-    """Кнопка главы; с trash - в одной строке с крестиком удаления."""
-    if not trash:
-        return ChapterButton(fic, chapter, role, mark)
-    btn = TrashButton(fic, chapter)
-    return Horizontal(
-        ChapterButton(fic, chapter, role, mark, btn), btn, classes="chapter_row"
-    )
-
-
-def fic_collapsible(
-    fic: Fic,
-    role: Role,
-    gone: list[SlimChapterInfo] | None = None,
-    new: list[SlimChapterInfo] | None = None,
-    gone_fic: bool = False,
-) -> FicCollapsible:
-    """gone - черновики глав, удалённых на сайте; new - неотправленные new-N.
-
-    gone_fic - работы нет на сайте: удалить можно любую главу и работу целиком.
-    """
-    chapters: list[Widget] = [
-        chapter_row(fic, ch, role, trash=gone_fic) for ch in fic.chapters
-    ]
-    chapters += [
-        chapter_row(fic, ch, role, " (нет на сайте)", True) for ch in gone or []
-    ]
-    chapters += [
-        chapter_row(fic, ch, role, " (не отправлена)", True) for ch in new or []
-    ]
-    if gone_fic:
-        chapters.append(
-            TrashButton(
-                fic,
-                None,
-                "Удалить работу X",
-                "Удалить работу и её главы ({n})? Нажмите ещё раз",
-            )
-        )
-    if can_manage(role, fic.readonly):
-        chapters.append(NewChapterButton(fic, role))
-    return FicCollapsible(
-        *chapters,
-        fic=fic,
-        role=role,
-        gone_fic=gone_fic,
-        classes=f"{role}_fics_collapsible",
-    )
-
-
-class StartPageTab(TabPane):
-    class Relogin(Message):
-        """Повторить вход из офлайна; обрабатывает App."""
-
-    def __init__(self, api: FicbookAPI | None, storage: ChapterStorage) -> None:
-        """api None - офлайн: список работ из fic.json."""
-        self.api = api
-        self.storage = storage
-        # одно уведомление на загрузку, а не на каждый fic.json
-        self.write_failed = False
-        super().__init__("Начало работы", id="start_page")
-
-    def compose(self) -> ComposeResult:
-        if self.api:
-            # равные колонки по бокам держат приветствие в центре, пока видна подпись
-            yield Horizontal(
-                Label("Загружаем список работ…", id="loading", classes="side"),
-                Label("Привет, гость!", id="greeting"),
-                Label(classes="side"),
-                id="greeting_row",
-            )
-        else:
-            yield Center(
-                Label("Офлайн: список работ с последнего входа", id="greeting")
-            )
-            yield Center(ClickableLabel("Повторить вход", classes="relogin_btn"))
-        yield Rule()
-        yield VerticalScroll(classes="fics_container")
-
-    def on_mount(self) -> None:
-        self.load_start_page()
-
-    # воркер отменяется при удалении вкладки и до закрытия клиента в MainScreen.on_unmount
-    @work(exclusive=True, group="start_page")
-    async def load_start_page(self) -> None:
-        """Ник и списки фанфиков; ошибка одного списка не прячет остальные."""
-        if self.api is None:
-            await self.load_offline()
-            return
-        try:
-            await self.load_online(self.api)
-        finally:
-            # и при ошибке, и при отмене воркера
-            # не remove: без колонки приветствие уедет влево
-            self.query("#loading").set(visible=False)
-
-    async def load_online(self, api: FicbookAPI) -> None:
-        try:
-            # после входа ник уже есть, запроса не будет
-            user = await api.get_user_info()
-            self.query_one("#greeting", Label).update(Content(f"Привет, {user.name}!"))
-        except FicbookAPIError as e:
-            report_api_error(self, e, "Не удалось загрузить профиль")
-            if isinstance(e, STOP_LOADING):
-                return
-
-        seen: set[str] = set()
-        # без какого-то списка не понять, какие работы пропали с сайта
-        all_loaded = True
-        # списки одновременно: 4 запроса укладываются в лимит частоты клиента;
-        # ответы разбираются по порядку, как раньше
-        results = await asyncio.gather(
-            *(api.get_fics(role) for role, _ in FIC_SECTIONS), return_exceptions=True
-        )
-        for (role, label), fics in zip(FIC_SECTIONS, results, strict=True):
-            if isinstance(fics, BaseException):
-                if not isinstance(fics, FicbookAPIError):
-                    raise fics
-                report_api_error(self, fics, f"Не удалось загрузить список «{label}»")
-                if isinstance(fics, STOP_LOADING):
-                    return
-                all_loaded = False
-                continue
-            seen.update(fic.id for fic in fics)
-            if not fics:
-                continue
-            collapsibles: list[Collapsible] = []
-            for fic in fics:
-                readonly: bool | None = fic.readonly
-                stored, broken = None, False
-                # есть главы в карточке - есть право; без глав различает только /parts
-                if not fic.chapters:
-                    stored, broken = self.stored_fic(fic.id)
-                    try:
-                        readonly = await api.is_readonly(fic.id)
-                    except FicbookAPIError as e:
-                        # раздел не прячем: работа из fic.json, без него - без прав
-                        report_api_error(
-                            self, e, f"Не удалось проверить права на «{fic.title}»"
-                        )
-                        if isinstance(e, STOP_LOADING):
-                            return
-                        readonly = None
-                plan = plan_fic(fic, readonly, stored, broken)
-                if plan.broken_warning:
-                    self.notify(
-                        f"Файл работы «{fic.title}» повреждён, список глав не показан",
-                        severity="error",
-                        markup=False,
-                    )
-                if plan.save:
-                    self.save_fic(plan.fic, role)
-                collapsibles.append(self.collapsible(plan.fic, role, plan.find_gone))
-            await self.mount_section(label, collapsibles)
-
-        if all_loaded:
-            await self.show_gone(seen)
-
-    async def load_offline(self) -> None:
-        """Разделы из fic.json - списка с последнего входа."""
-        stored, errors = self.storage.read_fics()
-        if errors:
-            self.notify(
-                "\n".join(errors),
-                title="Часть работ не показана",
-                severity="error",
-                markup=False,
-            )
-        for role, label in FIC_SECTIONS:
-            await self.mount_section(
-                label,
-                [
-                    # fic.json - последний список с сайта
-                    self.collapsible(fic, role, find_gone=not fic.readonly)
-                    for fic, fic_role in stored
-                    if fic_role == role
-                ],
-            )
-
-    async def mount_section(
-        self, label: str, collapsibles: list[Collapsible], classes: str = ""
-    ) -> None:
-        """classes - у разделителя и подписи, чтобы убрать раздел целиком."""
-        if not collapsibles:
-            return
-        fics_container = self.query_one(".fics_container", VerticalScroll)
-        if fics_container.children:  # разделитель
-            await fics_container.mount(Rule(classes=classes))
-        await fics_container.mount(
-            Label(f"{label}:", classes=f"fics_collapsibles_label {classes}"),
-            *collapsibles,
-        )
-
-    def collapsible(self, fic: Fic, role: Role, find_gone: bool) -> Collapsible:
-        """Работа вместе с локальными главами: удалёнными на сайте и new-N."""
-        gone = self.gone_chapters(fic) if find_gone else []
-        return fic_collapsible(fic, role, gone, self.storage.new_chapters(fic.id))
-
-    async def refresh_fic(
-        self, fic_id: str, added: SlimChapterInfo | None = None
-    ) -> None:
-        """Список глав работы заново; added - глава, только что созданная на сайте."""
-        container = self.query_one(".fics_container", VerticalScroll)
-        for old in list(self.query(FicCollapsible)):
-            if old.fic.id != fic_id or old.gone_fic:
-                continue
-            fic = old.fic
-            if added is not None and all(ch.id != added.id for ch in fic.chapters):
-                fic = replace(fic, chapters=[*fic.chapters, added])
-            new = self.collapsible(fic, old.role, find_gone=not fic.readonly)
-            if not old.collapsed:
-                new.collapsed = False
-                new.remove_class("-collapsed")
-            await container.mount(new, after=old)
-            await old.remove()
-
-    async def show_gone(self, seen: set[str]) -> None:
-        """Работы из fic.json, которых нет ни в одном списке сайта: черновики остаются."""
-        # повреждённые fic.json покажет офлайн-режим, здесь не до них
-        stored, _ = self.storage.read_fics(skip=seen)
-        gone: list[Collapsible] = []
-        for fic, role in stored:
-            # без черновика главу уже не скачать; название - из fic.json
-            known = {ch.id: ch for ch in fic.chapters}
-            chapters = [
-                known.get(ch.id, ch) for ch in self.storage.local_chapters(fic.id)
-            ]
-            new = self.storage.new_chapters(fic.id)
-            if chapters or new:
-                # readonly: отправлять некуда
-                gone.append(
-                    fic_collapsible(
-                        Fic(fic.id, fic.title, chapters, True),
-                        role,
-                        new=new,
-                        gone_fic=True,
-                    )
-                )
-        await self.mount_section(
-            "Нет на сайте (работа удалена или у вас больше нет к ней доступа), "
-            "локальные черновики только для чтения",
-            gone,
-            "gone_section",
-        )
-
-    def gone_chapters(self, fic: Fic) -> list[SlimChapterInfo]:
-        """Черновики глав, которых нет в списке с сайта: удалены на сайте."""
-        return self.storage.local_chapters(fic.id, skip={ch.id for ch in fic.chapters})
-
-    def stored_fic(self, fic_id: str) -> tuple[Fic | None, bool]:
-        """Работа из fic.json и признак, что файл есть, но не читается."""
-        try:
-            return self.storage.read_fic(fic_id)[0], False
-        except FileNotFoundError:
-            return None, False
-        except OSError, ValueError:
-            log.warning("fic.json %s не прочитан", fic_id, exc_info=True)
-            return None, True
-
-    def save_fic(self, fic: Fic, role: Role) -> None:
-        try:
-            self.storage.write_fic(fic, role)
-        except OSError:
-            log.warning("fic.json %s не записан", fic.id, exc_info=True)
-            if not self.write_failed:
-                self.write_failed = True
-                self.notify(
-                    "Не удалось сохранить список работ на диск, офлайн он будет неполным",
-                    severity="error",
-                )
-
-    @on(ClickableLabel.Pressed, ".relogin_btn")
-    def on_relogin_pressed(self) -> None:
-        self.set_connecting(True)
-        self.post_message(StartPageTab.Relogin())
-
-    def set_connecting(self, connecting: bool) -> None:
-        """Пока идёт вход, кнопка повтора неактивна: иначе нажатие начинает его заново."""
-        btn = self.query_one(".relogin_btn", ClickableLabel)
-        btn.update("Подключаемся…" if connecting else "Повторить вход")
-        btn.disabled = connecting
-
-    async def on_trash_button_confirmed(self, event: TrashButton.Confirmed) -> None:
-        btn = event.button
-        fic_id = btn.fic.id
-        chapter_id = btn.chapter.id if btn.chapter else None
-        collapsible = btn.query_ancestor(FicCollapsible)
-        # от работы без глав остался бы только fic.json
-        whole = chapter_id is None or (
-            collapsible.gone_fic and collapsible.chapter_count() == 1
-        )
-        # иначе автосохранение вкладки создаст черновик заново
-        if self.query_ancestor(MainScreen).is_open(
-            fic_id, None if whole else chapter_id
-        ):
-            self.notify("Сначала закройте вкладку главы", severity="warning")
-            return
-        try:
-            # whole уже включает chapter_id None; проверка сужает тип для pyright
-            if chapter_id is None or whole:
-                self.storage.trash_fic(fic_id)
-            else:
-                self.storage.trash_chapter(fic_id, chapter_id)
-        except OSError:
-            log.warning(
-                "%s/%s не перенесена в корзину",
-                fic_id,
-                "*" if whole else chapter_id,
-                exc_info=True,
-            )
-            self.notify("Не удалось перенести в корзину", severity="error")
-            return
-        if not whole:
-            await btn.query_ancestor(".chapter_row", Horizontal).remove()
-            return
-        await collapsible.remove()
-        if not any(c.gone_fic for c in self.query(FicCollapsible)):
-            await self.query(".gone_section").remove()
-
 
 class MainScreen(Screen):
+    """Вкладки: стартовая и главы. Что делают с главой, решает сама ChapterTab."""
+
     CSS_PATH = "../tcss/main.tcss"
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("f1", "start_page", "Начало работы"),
-        Binding("f5", "publish", "Отправить"),
-        Binding("f6", "status", "Статус"),
     ]
     # footer иначе идёт по цепочке от фокуса: ^w от TextArea встаёт первым
-    FOOTER_ORDER = ("f1", "f2", "f5", "f6")
-    # param главы: действие сайта, пункт меню, текст ошибки
-    STATUS_ACTIONS: ClassVar[
-        dict[
-            int, tuple[Literal["show_part", "hide_part", "disable_auto_pub"], str, str]
-        ]
-    ] = {
-        1: ("show_part", "Опубликовать", "Не удалось опубликовать главу"),
-        2: ("hide_part", "Скрыть в черновики", "Не удалось скрыть главу"),
-        3: (
-            "disable_auto_pub",
-            "Отменить отложенную публикацию",
-            "Не удалось отменить отложенную публикацию",
-        ),
-    }
+    FOOTER_ORDER = ("f1", "f2", "f4", "f5", "f6")
 
     @property
     def active_bindings(self) -> dict[str, ActiveBinding]:
@@ -617,46 +41,20 @@ class MainScreen(Screen):
         """api None - офлайн: только локальные черновики."""
         self.api = api
         self.storage = storage or ChapterStorage(DATA_DIR)
-        # tab_id глав, которые сейчас скачиваются: повторный клик не шлёт второй GET
-        self.fetching: set[str] = set()
-        # вкладка и время первого F5: отправляет второе нажатие в ней же
-        self.publish_armed: tuple[ChapterTab, float] | None = None
-        # вкладки, у которых сейчас меняется статус на сайте
-        self.changing_status: set[ChapterTab] = set()
         super().__init__()
 
     def compose(self) -> ComposeResult:
         with TabbedContent():
-            yield StartPageTab(self.api, self.storage)
+            yield StartPageTab(self.api, self.storage, self.is_open)
         with Horizontal(id="bottom_bar"):
             yield Footer()
             yield Label(id="chapter_info")
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
-        # на стартовой вкладке F1 некуда переходить, а закрыть её нельзя
+        # на стартовой вкладке F1 некуда переходить, а закрыть её нельзя;
         # до compose вкладок ещё нет
-        if action == "start_page" and not any(
-            t.active != "start_page" for t in self.query(TabbedContent)
-        ):
-            return False
-        pane = self.query_one(TabbedContent).active_pane
-        if action == "publish":
-            return (
-                self.api is not None
-                and isinstance(pane, ChapterTab)
-                and pane.publishable
-                and not pane.syncing
-                and pane not in self.changing_status
-            )
-        if action == "status":
-            return (
-                self.api is not None
-                and isinstance(pane, ChapterTab)
-                and pane.title_editable
-                and pane.site_status in self.STATUS_ACTIONS
-                and not pane.syncing
-                and pane not in self.changing_status
-            )
+        if action == "start_page":
+            return any(t.active != "start_page" for t in self.query(TabbedContent))
         return True
 
     def on_tabbed_content_tab_activated(self) -> None:
@@ -669,13 +67,20 @@ class MainScreen(Screen):
 
     def on_chapter_tab_title_saved(self, message: ChapterTab.TitleSaved) -> None:
         tab = message.tab
-        for btn in self.query(ChapterButton):
-            if (btn.fic.id, btn.chapter.id) == (tab.fic_id, tab.chapter_id):
-                btn.show_title(self.storage)
+        self.query_one(StartPageTab).show_title(tab.fic_id, tab.chapter_id)
 
     def on_chapter_tab_info_changed(self, message: ChapterTab.InfoChanged) -> None:
         if message.tab is self.query_one(TabbedContent).active_pane:
             self.show_info()
+
+    async def on_chapter_tab_created(self, message: ChapterTab.Created) -> None:
+        tab = message.tab
+        await self.query_one(StartPageTab).refresh_fic(
+            tab.fic_id, SlimChapterInfo(tab.chapter_id, tab.title_input.value)
+        )
+
+    async def on_chapter_tab_dropped(self, message: ChapterTab.Dropped) -> None:
+        await self.query_one(TabbedContent).remove_pane(message.tab.id or "")
 
     def show_info(self) -> None:
         pane = self.query_one(TabbedContent).active_pane
@@ -693,260 +98,50 @@ class MainScreen(Screen):
     def on_chapter_button_open(self, message: ChapterButton.Open) -> None:
         self.open_chapter(message.fic, message.chapter, message.role, message.on_site)
 
-    # на экране, а не на вкладке: воркер живёт, пока открыты вкладки глав
     # не exclusive: клик по другой главе не должен отменять открытие первой
     @work(group="open_chapter")
     async def open_chapter(
         self, fic: Fic, chapter: SlimChapterInfo, role: Role, on_site: bool = True
     ) -> None:
-        """Вкладка с черновиком; on_site - сначала догнать его до сайта."""
+        """Вкладка с черновиком; on_site - вкладка сначала догонит его до сайта."""
         tabbed = self.query_one(TabbedContent)
-        tab_id = ChapterTab.tab_id(fic.id, chapter.id)
-
-        def show() -> None:
-            tabbed.active = tab_id
-            # фокус с нажатой главы на скрытой стартовой вкладке вернул бы её обратно;
-            # сразу, а не focus(): иначе Hide отдаёт его соседней кнопке
-            self.set_focus(tabbed.query_one(f"#{tab_id}", ChapterTab).editor)
-
-        if tabbed.query(f"#{tab_id}"):
-            show()
-            return
-        if tab_id in self.fetching:
-            self.notify("Глава загружается…")
-            return
-        try:
-            text = self.storage.read_draft(fic.id, chapter.id)
-        except OSError, ValueError:  # ValueError: не UTF-8
-            log.warning("черновик %s/%s не прочитан", fic.id, chapter.id, exc_info=True)
-            self.notify("Не удалось прочитать черновик главы с диска", severity="error")
-            return
-        title = chapter.title
-        syncing = self.api is not None and on_site
-        if text is None and not syncing:
-            self.notify(
-                "Не удалось скачать главу\nОфлайн, а локальной копии главы нет",
-                severity="warning",
-            )
-            return
-        # вкладка сразу, а правки открываются после синхронизации:
-        # fast-forward не подменит текст под руками
-        tab = ChapterTab(
-            self.storage,
-            fic.id,
-            chapter.id,
-            text or "",
-            None if syncing else self.read_meta(fic.id, chapter.id, title),
-            title,
-            title_editable=can_manage(role, fic.readonly),
-            readonly=fic.readonly,
-            syncing=syncing,
-            publishable=not fic.readonly and (syncing or not on_site),
-            creates=not on_site,
-        )
-        await tabbed.add_pane(tab)
-        show()
-        if not syncing or self.api is None:
-            return
-        # не editor.loading: он снимает фокус, и TabbedContent уходит на стартовую вкладку
-        if text is None:
-            tab.status.update("Глава загружается…")
-        status = None
-        action = (
-            "Не удалось скачать главу" if text is None else "Не удалось обновить главу"
-        )
-        # вкладку могут закрыть и открыть снова, пока идёт запрос: вторая синхронизация
-        # той же главы не нужна
-        self.fetching.add(tab_id)
-        try:
-            synced = await sync_chapter(
-                self.api, self.storage, fic.id, chapter.id, title, fic.readonly
-            )
-        except FicbookAPIError as e:
-            report_api_error(self, e, action)
-        except OSError, ValueError:
-            log.warning("глава %s/%s не обновлена", fic.id, chapter.id, exc_info=True)
-            self.notify(
-                f"{action}\nОшибка чтения или записи на диске", severity="error"
-            )
-        else:
-            text, status = synced.text, synced.status
-            self.report_synced(synced)
-        finally:
-            self.fetching.discard(tab_id)
-        if not tab.is_attached:
-            return
-        if text is None:
-            await tabbed.remove_pane(tab_id)
-            return
-        tab.synced(text, self.read_meta(fic.id, chapter.id, title), status)
-
-    def report_synced(self, synced: Synced) -> None:
-        if synced.title_conflict is not None:
-            self.notify(
-                f"Название изменили и на сайте: «{synced.title_conflict}»",
-                severity="warning",
-            )
-        if synced.kind == "ff" and synced.site is not None:
-            v = synced.site
-            self.notify(
-                f"Обновлено до правки номер {v.site_num} ({v.author_name}, {v.created})"
-            )
-        elif synced.kind == "merge":
-            # shortcut: слияния нет до MergeScreen, черновик остаётся как есть
-            self.notify(
-                "На сайте новая правка, слияние пока недоступно", severity="warning"
-            )
-
-    def action_publish(self) -> None:
-        pane = self.query_one(TabbedContent).active_pane
-        if not isinstance(pane, ChapterTab):
-            return
-        if pane.creates and not pane.title_editable:
-            self.notify(
-                "Главы нет на сайте, а создавать главы в этой работе вам нельзя",
-                severity="warning",
-            )
-            return
-        armed, self.publish_armed = self.publish_armed, None
-        delay = TrashButton.CONFIRM_DELAY
-        if armed is None or armed[0] is not pane or time.monotonic() - armed[1] > delay:
-            self.publish_armed = (pane, time.monotonic())
-            prompt = "Нажмите F5 ещё раз, чтобы отправить"
-            if pane.creates and pane.chapter_id.startswith("new-"):
-                prompt = "Нажмите F5 ещё раз, чтобы создать главу на сайте"
-            elif pane.creates:
-                prompt = (
-                    "Глава удалена на сайте. "
-                    "Нажмите F5 ещё раз, чтобы создать её заново"
+        tab = self.find_tab(fic.id, chapter.id)
+        if tab is None:
+            try:
+                text = self.storage.read_draft(fic.id, chapter.id)
+            except OSError, ValueError:  # ValueError: не UTF-8
+                log.warning(
+                    "черновик %s/%s не прочитан", fic.id, chapter.id, exc_info=True
                 )
-            self.notify(prompt, timeout=delay)
-            return
-        if pane.save():
-            self.publish(pane)
-
-    # пока идёт отправка, правки во вкладке закрыты: черновик равен отправленному тексту
-    @work(group="publish")
-    async def publish(self, tab: ChapterTab) -> None:
-        if self.api is None:
-            return
-        tab.exchanging("Отправляем…")
-        status, error, created = tab.site_status, None, None
-        try:
-            published = await publish_chapter(
+                self.notify(
+                    "Не удалось прочитать черновик главы с диска", severity="error"
+                )
+                return
+            syncing = self.api is not None and on_site
+            if text is None and not syncing:
+                self.notify(
+                    "Не удалось скачать главу\nОфлайн, а локальной копии главы нет",
+                    severity="warning",
+                )
+                return
+            tab = ChapterTab(
                 self.api,
                 self.storage,
-                tab.fic_id,
-                tab.chapter_id,
-                tab.title_input.value,
-                tab.creates,
+                fic.id,
+                chapter.id,
+                text,
+                chapter.title,
+                title_editable=can_manage(role, fic.readonly),
+                readonly=fic.readonly,
+                syncing=syncing,
+                publishable=not fic.readonly and (syncing or not on_site),
+                creates=not on_site,
             )
-        except FicbookAPIError as e:
-            report_api_error(self, e, "Не удалось отправить главу")
-            # глава могла создаться до ошибки; не создана наверняка только при отказе сайта
-            if tab.creates and not isinstance(e, SiteRejectedError):
-                self.notify(
-                    "Проверьте на сайте, не создалась ли глава, прежде чем "
-                    "отправлять её снова",
-                    severity="warning",
-                )
-        except OSError, ValueError:
-            log.warning(
-                "глава %s/%s не отправлена", tab.fic_id, tab.chapter_id, exc_info=True
-            )
-            self.notify(
-                "Не удалось отправить главу\nОшибка чтения или записи на диске",
-                severity="error",
-            )
-        else:
-            synced = published.after or published.first
-            status, error = synced.status, published.error
-            if published.renamed:
-                created = published.created
-            self.report_synced(published.first)
-            if not published.renamed:
-                # повторная отправка старой папки создала бы на сайте дубль
-                tab.publishable = False
-                self.notify(
-                    "Глава создана на сайте, но черновик не перенесён: ошибка на диске. "
-                    "Не отправляйте его снова - на сайте появится вторая такая глава",
-                    severity="error",
-                    timeout=30,
-                )
-            elif published.unchanged:
-                self.notify("Глава не отличается от сайта, отправлять нечего")
-            elif published.created is not None:
-                if published.after is not None:
-                    self.report_synced(published.after)
-                # история догонится при следующем открытии: это не ошибка
-                self.notify("Глава создана на сайте как черновик")
-            elif published.after is not None:
-                self.report_synced(published.after)
-                v = published.rev
-                if v is None:
-                    self.notify("Отправлено")
-                else:
-                    self.notify(f"Отправлено (правка номер {v.site_num})")
-            elif published.first.kind != "merge" and error is None:
-                self.notify(
-                    "Отправлено, но историю правок перечитать не удалось",
-                    severity="warning",
-                )
-        if not tab.is_attached:
-            return
-        if created is not None:
-            title = tab.title_input.value
-            await self.reopen(tab, created, status)
-            await self.query_one(StartPageTab).refresh_fic(
-                tab.fic_id, SlimChapterInfo(created, title)
-            )
-            return
-        # после ошибки на диске мог остаться текст fast-forward
-        try:
-            text = self.storage.read_draft(tab.fic_id, tab.chapter_id)
-        except OSError, ValueError:
-            text = None
-        meta = self.read_meta(tab.fic_id, tab.chapter_id, tab.title_input.value)
-        tab.synced(tab.editor.text if text is None else text, meta, status)
-        if error is not None:
-            tab.editor.cursor_location = (error.line, error.col)
-            self.notify(
-                f"Ошибка разметки, строка {error.line + 1}: {error.message}",
-                severity="error",
-            )
-
-    async def reopen(
-        self, tab: ChapterTab, chapter_id: str, status: int | None
-    ) -> None:
-        """Вкладка главы под новым id: id виджета не меняется."""
-        tabbed = self.query_one(TabbedContent)
-        title = tab.title_input.value
-        try:
-            text = self.storage.read_draft(tab.fic_id, chapter_id)
-        except OSError, ValueError:
-            text = None
-        new = ChapterTab(
-            self.storage,
-            tab.fic_id,
-            chapter_id,
-            tab.editor.text if text is None else text,
-            self.read_meta(tab.fic_id, chapter_id, title),
-            title,
-            title_editable=tab.title_editable,
-            readonly=tab.readonly,
-            publishable=True,
-        )
-        new.site_status = status
-        active = tabbed.active == tab.id
-        cursor = tab.editor.cursor_location
-        # старой папки уже нет: запись при снятии вкладки ушла бы в новую
-        tab.chapter_id = chapter_id
-        await tabbed.add_pane(new, after=tab)
-        await tabbed.remove_pane(tab.id or "")
-        if active:
-            tabbed.active = new.id or ""
-            new.editor.cursor_location = cursor
-            self.set_focus(new.editor)
+            await tabbed.add_pane(tab)
+        tabbed.active = tab.id or ""
+        # фокус с нажатой главы на скрытой стартовой вкладке вернул бы её обратно;
+        # сразу, а не focus(): иначе Hide отдаёт его соседней кнопке
+        self.set_focus(tab.editor)
 
     async def on_new_chapter_button_create(
         self, message: NewChapterButton.Create
@@ -961,76 +156,19 @@ class MainScreen(Screen):
             chapter_id = self.storage.new_chapter_id(btn.fic.id)
             self.storage.write_chapter(btn.fic.id, chapter_id, ChapterMeta(title))
             self.storage.write_draft(btn.fic.id, chapter_id, "")
-        except OSError:
-            log.warning("новая глава в %s не создана", btn.fic.id, exc_info=True)
-            self.notify(
-                "Не удалось создать главу\nОшибка записи на диске", severity="error"
-            )
+        except OSError as e:
+            report_disk_error(self, e, "Не удалось создать главу", btn.fic.id)
             return
         fic, role = btn.fic, btn.role
         await self.query_one(StartPageTab).refresh_fic(fic.id)
         self.open_chapter(fic, SlimChapterInfo(chapter_id, title), role, on_site=False)
 
-    def action_status(self) -> None:
-        pane = self.query_one(TabbedContent).active_pane
-        if not isinstance(pane, ChapterTab) or pane.site_status is None:
-            return
-        action, label, _ = self.STATUS_ACTIONS[pane.site_status]
-
-        def chosen(result: str | None) -> None:
-            if result is not None:
-                self.change_status(pane)
-
-        confirm = {"show_part": "Нажмите ещё раз, чтобы опубликовать"}
-        self.app.push_screen(
-            MenuScreen("Статус главы", [(action, label)], confirm), chosen
-        )
-
-    # текст не отправляется, поэтому правки во вкладке не закрываются
-    @work(group="chapter_status")
-    async def change_status(self, tab: ChapterTab) -> None:
-        if self.api is None or tab.site_status not in self.STATUS_ACTIONS:
-            return
-        action, _, failed = self.STATUS_ACTIONS[tab.site_status]
-        status = tab.site_status
-        self.changing_status.add(tab)
-        self.refresh_bindings()
-        try:
-            await self.api.set_chapter_status(tab.chapter_id, action)
-            try:
-                chapter = await self.api.get_chapter(tab.fic_id, tab.chapter_id)
-            except FicbookAPIError as e:
-                report_api_error(
-                    self, e, "Статус изменён, но перечитать главу не удалось"
-                )
-            else:
-                status = chapter.status
-                if status is not None:
-                    self.notify(f"Статус главы: {STATUSES.get(status, status)}")
-        except FicbookAPIError as e:
-            report_api_error(self, e, failed)
-        finally:
-            self.changing_status.discard(tab)
-        if tab.is_attached:
-            tab.site_status = status
-            tab.post_message(tab.InfoChanged(tab))
-        self.refresh_bindings()
-
-    def read_meta(self, fic_id: str, chapter_id: str, title: str) -> ChapterMeta | None:
-        """None: chapter.json повреждён."""
-        try:
-            return self.storage.read_chapter(fic_id, chapter_id)
-        except FileNotFoundError:
-            return ChapterMeta(title)
-        except OSError, ValueError:
-            log.warning(
-                "chapter.json %s/%s не прочитан", fic_id, chapter_id, exc_info=True
-            )
-            self.notify(
-                "chapter.json главы повреждён: название не будет сохраняться",
-                severity="error",
-            )
-            return None
+    # по полям, а не по id виджета: после создания на сайте chapter_id вкладки меняется
+    def find_tab(self, fic_id: str, chapter_id: str) -> ChapterTab | None:
+        for tab in self.query(ChapterTab):
+            if (tab.fic_id, tab.chapter_id) == (fic_id, chapter_id):
+                return tab
+        return None
 
     def is_open(self, fic_id: str, chapter_id: str | None) -> bool:
         """Открыта ли вкладка главы; chapter_id None - любой главы работы."""
@@ -1046,13 +184,16 @@ class MainScreen(Screen):
 
     # пкм по вкладке закрывает главу: ctrl+w нужен TextArea, alt+backspace приходит как он
     async def on_click(self, event: events.Click) -> None:
-        if event.button != 3 or not isinstance(event.widget, ContentTab):
+        if event.button != 3 or not isinstance(event.widget, Tab):
             return
         tabbed = self.query_one(TabbedContent)
-        pane = tabbed.get_pane(event.widget)
-        # закрытую до конца синхронизации главу повторный клик не открыл бы;
+        pane = next(
+            (p for p in self.query(ChapterTab) if tabbed.get_tab(p) is event.widget),
+            None,
+        )
+        # закрытие отменило бы обмен с сайтом на полпути, его воркеры живут во вкладке;
         # не записанный черновик остаётся открытым: после закрытия текст был бы только в памяти
-        if isinstance(pane, ChapterTab) and not pane.syncing and pane.save():
+        if pane is not None and not pane.busy and pane.save():
             await tabbed.remove_pane(pane.id or "")
 
     async def on_unmount(self) -> None:

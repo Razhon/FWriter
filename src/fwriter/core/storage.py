@@ -52,9 +52,9 @@ class MergeChoice:
 class LastMerge:
     """Файлы версий последнего слияния и решения по его блокам."""
 
-    base: str
     site: str
     mine: str
+    base: str | None = None  # None - у черновика не было base, предок - пустой текст
     choices: list[MergeChoice] = field(default_factory=list)
 
 
@@ -147,12 +147,16 @@ def _opt(value: object, kind: type) -> bool:
 
 
 def _merge_ok(merge: LastMerge) -> bool:
-    files = (merge.base, merge.site, merge.mine)
-    return all(isinstance(s, str) for s in files) and all(
-        all(type(n) is int for n in (c.part, c.start))
-        and c.choice in get_args(Decision.__value__)
-        and (isinstance(c.text, str) if c.choice == "manual" else c.text is None)
-        for c in merge.choices
+    files = (merge.site, merge.mine)
+    return (
+        all(isinstance(s, str) for s in files)
+        and _opt(merge.base, str)
+        and all(
+            all(type(n) is int for n in (c.part, c.start))
+            and c.choice in get_args(Decision.__value__)
+            and (isinstance(c.text, str) if c.choice == "manual" else c.text is None)
+            for c in merge.choices
+        )
     )
 
 

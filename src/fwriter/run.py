@@ -16,7 +16,7 @@ from .core.api.client import FicbookAPI
 from .core.api.errors import LoginFailedError, NetworkError, SiteError
 from .core.storage import DATA_DIR, lock_data_dir
 from .screens import *
-from .screens.main import StartPageTab
+from .screens.start_page import StartPageTab
 from .secrets import *
 
 log = logging.getLogger(__name__)

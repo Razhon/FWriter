@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 from textual.app import App
 from textual.geometry import Region
-from textual.widgets import Collapsible, Input, Label, Log, TabbedContent
+from textual.widgets import Button, Collapsible, Input, Label, Log, TabbedContent
 from textual.widgets._collapsible import CollapsibleTitle
 from textual.widgets.text_area import Selection
 
@@ -21,7 +21,8 @@ from fwriter.core.api.errors import (
 )
 from fwriter.core.api.models import Chapter, Fic, SlimChapterInfo, UserInfo
 from fwriter.core.markup import MarkupError
-from fwriter.core.storage import ChapterStorage, Version
+from fwriter.core.merge import merge3
+from fwriter.core.storage import ChapterStorage, MergeChoice, Version
 from fwriter.core.sync import Published, Synced
 from fwriter.run import FWriterApp, setup_logging
 from fwriter.screens import (
@@ -32,15 +33,18 @@ from fwriter.screens import (
     SessionExpired,
 )
 from fwriter.screens.api_errors import report_api_error
-from fwriter.screens.chapter import ChapterEditor, ChapterTab
-from fwriter.screens.main import (
+from fwriter.screens.chapter import ChapterTab
+from fwriter.screens.diff import diff_text
+from fwriter.screens.editor import ChapterEditor
+from fwriter.screens.menu import MenuScreen
+from fwriter.screens.merge import MergeScreen, rev_line
+from fwriter.screens.start_page import (
     FIC_SECTIONS,
     ChapterButton,
-    ClickableLabel,
     NewChapterButton,
     TrashButton,
 )
-from fwriter.screens.menu import MenuScreen
+from fwriter.screens.widgets import ClickableLabel
 from fwriter.secrets import SecretStorage
 
 
@@ -53,7 +57,7 @@ def offline_api(tmp_path, monkeypatch):
         return False
 
     monkeypatch.setattr(FicbookAPI, "is_readonly", not_readonly)
-    monkeypatch.setattr("fwriter.screens.main.sync_chapter", fake_sync)
+    monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", fake_sync)
     # тесты не ждут подсветку нажатия
     monkeypatch.setattr(ClickableLabel, "PRESS_DELAY", 0.01)
 
@@ -626,7 +630,6 @@ def test_click_while_loading_sends_one_request(tmp_path):
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
             assert len(main.query(ChapterTab)) == 1
-            assert not main.fetching
             assert not tab.editor.read_only and main.focused is tab.editor
             assert not tab.title_input.disabled and not tab.status.display
 
@@ -658,7 +661,6 @@ def test_click_while_loading_sends_one_request(tmp_path):
             ),
             "Обновлено до правки номер 2 (user-1, 2026-10-27T10:00:00)",
         ),
-        (Synced("merge", "Текст."), "На сайте новая правка, слияние пока недоступно"),
         (
             NetworkError("Нет связи с сайтом"),
             "Не удалось обновить главу\nНет связи с сайтом",
@@ -675,7 +677,7 @@ def test_open_chapter_syncs(tmp_path, monkeypatch, result, note: str):
             raise result
         return result
 
-    monkeypatch.setattr("fwriter.screens.main.sync_chapter", synced)
+    monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
 
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
@@ -696,7 +698,7 @@ def test_open_chapter_without_draft_closes_on_sync_error(tmp_path, monkeypatch):
     async def synced(*args) -> Synced:
         raise NetworkError("Нет связи с сайтом")
 
-    monkeypatch.setattr("fwriter.screens.main.sync_chapter", synced)
+    monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
 
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
@@ -719,7 +721,7 @@ def test_chapter_off_site_is_not_synced(tmp_path, monkeypatch):
         calls.append("sync")
         return Synced("same", "Текст.")
 
-    monkeypatch.setattr("fwriter.screens.main.sync_chapter", synced)
+    monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
 
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
@@ -746,7 +748,7 @@ def test_editor_rewraps_on_screen_after_sync(tmp_path, monkeypatch):
         await response.wait()
         return Synced("same", text)
 
-    monkeypatch.setattr("fwriter.screens.main.sync_chapter", synced)
+    monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
 
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
@@ -780,7 +782,7 @@ def test_chapter_info_and_rename(tmp_path, monkeypatch):
     async def synced(*args) -> Synced:
         return Synced("same", "Текст  главы.", status=2)
 
-    monkeypatch.setattr("fwriter.screens.main.sync_chapter", synced)
+    monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
 
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
@@ -1243,7 +1245,7 @@ def test_new_chapter_created_on_site(tmp_path, monkeypatch):
         first = Synced("same", "Текст.")
         return Published(first, None, first, None, created="2002")
 
-    monkeypatch.setattr("fwriter.screens.main.publish_chapter", published)
+    monkeypatch.setattr("fwriter.screens.chapter.publish_chapter", published)
 
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
@@ -1261,12 +1263,21 @@ def test_new_chapter_created_on_site(tmp_path, monkeypatch):
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
             assert sent == [("new-1", True)]
-            [tab] = main.query(ChapterTab)
+            # та же вкладка: история отмены не теряется
+            assert main.query(ChapterTab).nodes == [tab]
             assert tab.chapter_id == "2002" and not tab.creates
             assert main.query_one(TabbedContent).active == tab.id
             assert chapter_titles(main) == ["Глава", "Глава 2"]
             messages = [n.message for n in pilot.app._notifications]
             assert "Глава создана на сайте как черновик" in messages
+            # глава из списка под новым id открывает ту же вкладку, а не вторую
+            await pilot.press("f1")
+            [btn] = [b for b in main.query(ChapterButton) if b.chapter.id == "2002"]
+            btn.action_press()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert main.query(ChapterTab).nodes == [tab]
+            assert main.query_one(TabbedContent).active == tab.id
 
     asyncio.run(run())
 
@@ -1282,9 +1293,9 @@ def test_created_but_not_renamed_blocks_publish(tmp_path, monkeypatch):
     main = MainScreen(api, storage)
 
     async def published(api, storage, fic_id, chapter_id, title, create=False):
-        return Published(Synced("same", ""), created="2002", renamed=False)
+        return Published(Synced("same", ""), created="2002", stranded=True)
 
-    monkeypatch.setattr("fwriter.screens.main.publish_chapter", published)
+    monkeypatch.setattr("fwriter.screens.chapter.publish_chapter", published)
 
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
@@ -1301,7 +1312,7 @@ def test_created_but_not_renamed_blocks_publish(tmp_path, monkeypatch):
             await pilot.pause()
             tab = main.query_one(ChapterTab)
             assert tab.chapter_id == "new-1" and not tab.publishable
-            assert not main.check_action("publish", ())
+            assert not tab.check_action("publish", ())
 
     asyncio.run(run())
 
@@ -1489,7 +1500,7 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
 
     Последняя глава работы из "Нет на сайте" уносит в корзину всю работу.
     """
-    monkeypatch.setattr(TrashButton, "CONFIRM_DELAY", 0.3)
+    monkeypatch.setattr("fwriter.screens.start_page.CONFIRM_DELAY", 0.3)
     api = api_without_fics()
     storage = ChapterStorage(tmp_path)
     storage.write_fic(FIC, "author")
@@ -1546,7 +1557,9 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
             await press_twice(pilot, gone1)
             assert "закройте вкладку" in list(pilot.app._notifications)[-1].message
             assert storage.read_draft("2", "1") == "Раз."
-            await main.query_one(TabbedContent).remove_pane(ChapterTab.tab_id("2", "1"))
+            await main.query_one(TabbedContent).remove_pane(
+                main.query_one(ChapterTab).id or ""
+            )
 
             await press_twice(pilot, gone1)
             assert storage.read_draft("2", "1") is None
@@ -1568,7 +1581,9 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
             await pilot.pause()
             assert "закройте вкладку" in list(pilot.app._notifications)[-1].message
             assert (tmp_path / "fics" / "2" / "fic.json").exists()
-            await main.query_one(TabbedContent).remove_pane(ChapterTab.tab_id("2", "2"))
+            await main.query_one(TabbedContent).remove_pane(
+                main.query_one(ChapterTab).id or ""
+            )
 
             # мышью по крестику; последняя глава - вся работа
             trash = gone2.trash
@@ -1602,7 +1617,7 @@ def test_f5_publishes_with_tab_locked(tmp_path, monkeypatch, error):
         rev = Version("v.txt", "Глава", "site", "2026-10-28T12:00:00", site_num=3)
         return Published(first, None, first, rev)
 
-    monkeypatch.setattr("fwriter.screens.main.publish_chapter", published)
+    monkeypatch.setattr("fwriter.screens.chapter.publish_chapter", published)
 
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
@@ -1612,7 +1627,7 @@ def test_f5_publishes_with_tab_locked(tmp_path, monkeypatch, error):
             await pilot.press("f5")
             await pilot.app.workers.wait_for_complete()
             assert seen == []
-            assert main.publish_armed is not None
+            assert main.query_one(ChapterTab).publish_armed is not None
             await pilot.press("f5")
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
@@ -1644,7 +1659,7 @@ def test_footer_order_in_chapter(tmp_path):
             await pilot.app.workers.wait_for_complete()
             await open_chapter(pilot, main)
             shown = [b.key for _, b, *_ in main.active_bindings.values() if b.show]
-            assert shown[:3] == ["f1", "f2", "f5"]
+            assert shown[:4] == ["f1", "f2", "f4", "f5"]
 
     asyncio.run(run())
 
@@ -1660,7 +1675,7 @@ def test_f6_changes_status(tmp_path, monkeypatch, before, action, presses):
     async def synced(*args) -> Synced:
         return Synced("same", "Текст.", status=status)
 
-    monkeypatch.setattr("fwriter.screens.main.sync_chapter", synced)
+    monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
 
     async def fake_get_chapter(fic_id: str, chapter_id: str) -> Chapter:
         return Chapter("Глава", "Текст.", True, status=status, history_url="")
@@ -1693,7 +1708,7 @@ def test_f6_changes_status(tmp_path, monkeypatch, before, action, presses):
             await pilot.pause()
             assert sent == [("00000000", action)]
             assert main.query_one(ChapterTab).site_status == 3 - before
-            assert main.check_action("status", ())
+            assert main.query_one(ChapterTab).check_action("status", ())
 
     asyncio.run(run())
 
@@ -1772,3 +1787,116 @@ def test_tag_keys_in_editor(tmp_path):
             assert spans[0].style != spans[1].style
 
     asyncio.run(run())
+
+
+async def wait_merge_screen(pilot) -> MergeScreen:
+    # воркер слияния ждёт экран: wait_for_complete не дождался бы его
+    for _ in range(50):
+        await pilot.pause()
+        if isinstance(pilot.app.screen, MergeScreen):
+            break
+    screen = pilot.app.screen
+    assert isinstance(screen, MergeScreen)
+    return screen
+
+
+def test_merge_screen_writes_result(tmp_path, monkeypatch):
+    storage = ChapterStorage(tmp_path)
+    ids = ("00000000", "00000000")
+    base = storage.add_version(*ids, "Было.\n\nОбщее.", "Глава", "site")
+    meta = storage.read_chapter(*ids)
+    storage.write_chapter(*ids, replace(meta, base=base.file))
+    storage.write_draft(*ids, "Моё.\n\nОбщее.")
+    site = storage.add_version(*ids, "Сайт.\n\nОбщее!", "Глава", "site", site_num=2)
+    main = MainScreen(api_without_fics(), storage)
+
+    async def synced(*args) -> Synced:
+        return Synced("merge", "Моё.\n\nОбщее.", site)
+
+    monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            main.open_chapter(FIC, FIC.chapters[0], "author")
+            screen = await wait_merge_screen(pilot)
+            done = screen.query_one("#merge_done", Button)
+            # конфликт в первом абзаце не разобран
+            assert done.disabled
+            await pilot.press("2")
+            assert not done.disabled
+            # Esc откладывает: черновик прежний, F4 возвращает решение
+            await pilot.press("escape")
+            await pilot.app.workers.wait_for_complete()
+            assert storage.read_draft(*ids) == "Моё.\n\nОбщее."
+            assert storage.read_chapter(*ids).base == base.file
+            await pilot.press("f4")
+            screen = await wait_merge_screen(pilot)
+            assert screen.choices == {0: "site"}
+            # набрано до MergeScreen, автосохранение ещё не сработало
+            main.query_one(ChapterTab).editor.insert("Ещё. ", (0, 0))
+            await pilot.click("#merge_done")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+
+            texts = [
+                storage.read_version(*ids, v.file)
+                for v in storage.read_chapter(*ids).versions
+            ]
+            assert "Ещё. Моё.\n\nОбщее." in texts
+            assert storage.read_draft(*ids) == "Сайт.\n\nОбщее!"
+            assert main.query_one(ChapterTab).editor.text == "Сайт.\n\nОбщее!"
+            meta = storage.read_chapter(*ids)
+            assert meta.base == site.file
+            assert meta.last_merge is not None
+            assert meta.last_merge.choices == [MergeChoice(0, 0, "site")]
+
+            # F4: то же слияние с прежним решением; Esc не трогает черновик
+            await pilot.press("f4")
+            screen = await wait_merge_screen(pilot)
+            assert screen.choices == {0: "site"}
+            await pilot.press("1", "escape")
+            await pilot.app.workers.wait_for_complete()
+            assert storage.read_draft(*ids) == "Сайт.\n\nОбщее!"
+
+    asyncio.run(run())
+
+
+def test_rev_line_skips_missing_parts():
+    assert rev_line(5, "user-1", "2026-10-27T10:00", "") == (
+        "Правка номер 5 · user-1 · 2026-10-27 10:00"
+    )
+    # своя версия publish: без ника
+    assert rev_line(5, None, "2026-10-27T10:00", "пояснение") == (
+        "Правка номер 5 · 2026-10-27 10:00 · пояснение"
+    )
+    # версия сайта при F4: секунды не показываем
+    assert rev_line(None, None, "2026-10-27T10:00:31", "") == "2026-10-27 10:00"
+
+
+def test_merge_screen_ignores_keys_in_empty_filter():
+    screen = MergeScreen("Глава", merge3("Было.", "Сайт.", "Было."), {}, [])
+
+    async def run():
+        async with App().run_test() as pilot:
+            pilot.app.push_screen(screen)
+            await pilot.pause()
+            # "только конфликты", а конфликтов нет: блок сайта скрыт
+            await pilot.press("f", "f")
+            assert screen.filtered() == []
+            await pilot.press("1", "e")
+            assert screen.choices == {}
+            assert pilot.app.screen is screen
+
+    asyncio.run(run())
+
+
+def test_diff_text_big_block():
+    old = [f"абзац {i} текст главы" for i in range(500)]
+    new = old.copy()
+    new[1] = "абзац 1 новый главы"
+    new.insert(300, "вставка")
+    text = diff_text(old, new)
+    assert text.plain == "\n".join(new)
+    marked = [text.plain[s.start : s.end] for s in text.spans if s.style == "reverse"]
+    assert marked == ["новый", "\n", "вставка"]
