@@ -14,6 +14,8 @@ log = logging.getLogger(__name__)
 
 type SyncKind = Literal["same", "new", "ff", "merge"]
 
+EDGE = " \t\r\n "  # что сайт срезает по краям текста
+
 
 @dataclass(frozen=True)
 class Synced:
@@ -147,13 +149,30 @@ class Published:
     after: Synced | None = None
     rev: Version | None = None  # новая base; None - сайт правку не создал
     unchanged: bool = False  # текст и название как на сайте: отправлять нечего
+    created: str | None = None  # id главы, созданной на сайте
+    # False - глава создана, но текст остался в старой папке: повтор создаст дубль
+    renamed: bool = True
 
 
 async def publish_chapter(
-    api: FicbookAPI, storage: ChapterStorage, fic_id: str, chapter_id: str, title: str
+    api: FicbookAPI,
+    storage: ChapterStorage,
+    fic_id: str,
+    chapter_id: str,
+    title: str,
+    create: bool = False,
 ) -> Published:
-    """Отправка F5; черновик и название уже на диске."""
-    # shortcut: только save_chapter(), остальное - с DiffScreen и "Новой главой"
+    """Отправка F5; черновик и название уже на диске.
+
+    create - главы нет на сайте (new-N или удалена там): создать её заново.
+    """
+    # сайт срезает их сам, и черновик потом не совпал бы с сайтом
+    draft = storage.read_draft(fic_id, chapter_id)
+    if draft is not None and draft != draft.strip(EDGE):
+        storage.write_draft(fic_id, chapter_id, draft.strip(EDGE))
+    if create:
+        return await _create_chapter(api, storage, fic_id, chapter_id)
+    # shortcut: без revert_revision(), он придёт с DiffScreen
     first = await sync_chapter(api, storage, fic_id, chapter_id, title, False)
     if first.kind == "merge":
         return Published(first)
@@ -179,3 +198,40 @@ async def publish_chapter(
     new = storage.read_chapter(fic_id, chapter_id)
     rev = next((v for v in new.versions if v.file == new.base), None)
     return Published(first, None, after, None if new.base == meta.base else rev)
+
+
+async def _create_chapter(
+    api: FicbookAPI, storage: ChapterStorage, fic_id: str, chapter_id: str
+) -> Published:
+    text = storage.read_draft(fic_id, chapter_id) or ""
+    first = Synced("same", text)
+    error = check(text)
+    if error is not None:
+        return Published(first, error)
+    meta = storage.read_chapter(fic_id, chapter_id)
+    # base и история ссылаются на удалённую на сайте главу
+    meta = replace(meta, base=None, restored=None, history_url=None, site_title=None)
+    storage.write_chapter(fic_id, chapter_id, meta)
+    storage.add_version(fic_id, chapter_id, text, meta.title, "publish")
+    new_id = await api.create_chapter(fic_id, meta.title, text)
+    try:
+        storage.rename_chapter(fic_id, chapter_id, new_id, meta.title)
+    except OSError, ValueError:
+        log.warning(
+            "глава %s/%s: создана как %s, но не переименована",
+            fic_id,
+            chapter_id,
+            new_id,
+            exc_info=True,
+        )
+        return Published(first, created=new_id, renamed=False)
+    try:
+        after = await sync_chapter(api, storage, fic_id, new_id, meta.title, False)
+    except FicbookAPIError, OSError, ValueError:
+        log.warning(
+            "глава %s/%s: история после создания", fic_id, new_id, exc_info=True
+        )
+        return Published(first, created=new_id)
+    new = storage.read_chapter(fic_id, new_id)
+    rev = next((v for v in new.versions if v.file == new.base), None)
+    return Published(first, None, after, rev, created=new_id)

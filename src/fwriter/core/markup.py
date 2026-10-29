@@ -545,7 +545,10 @@ def _to_raw(p: _Plain, a: int, b: int, repl: str) -> list[Edit]:
     return [(out[0][0], out[0][1], repl)]
 
 
-_DASH = re.compile(r"^[ \t\xa0]*(--|–|-)(?=[ \t\xa0])")
+# в начале строки или между пробелами; дефис в слове и у одного пробела не тире
+_DASH = re.compile(r"(?:^|(?<=[ \t\xa0]))(?:--|–|-)(?=[ \t\xa0])")
+# разделитель сцены без <center>
+_DASHES_ONLY = re.compile(r"[-–— \t\xa0]*")
 _ELLIPSIS = re.compile(r"(?<![.?!])\.\.\.(?!\.)")
 _SPACES = re.compile(
     r"(?P<drop>^[ \t]+|[ \t]+\Z|[ \t]+(?=[,.!?:;…]))|(?P<one>[ \t]{2,}|\t)"
@@ -553,8 +556,9 @@ _SPACES = re.compile(
 
 
 def _dash_rule(s: str) -> list[Edit]:
-    m = _DASH.match(s)
-    return [(m.start(1), m.end(1), "—")] if m else []
+    if _DASHES_ONLY.fullmatch(s):
+        return []
+    return [(m.start(), m.end(), "—") for m in _DASH.finditer(s)]
 
 
 def _ellipsis_rule(s: str) -> list[Edit]:

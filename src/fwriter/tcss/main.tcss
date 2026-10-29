@@ -131,3 +131,12 @@ ChapterEditor > .chapter-editor--footnote {
 ChapterEditor > .chapter-editor--tab {
     color: $accent;
 }
+
+/* тире фоном: цвета текста заняты тегами; среднее в прозе обычно ошибка */
+ChapterEditor > .chapter-editor--emdash {
+    background: $primary-muted;
+}
+
+ChapterEditor > .chapter-editor--endash {
+    background: $error;
+}

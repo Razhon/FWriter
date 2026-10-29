@@ -5,8 +5,14 @@ import pytest
 
 from fwriter.core.api.client import FicbookAPI
 from fwriter.core.api.errors import NetworkError
-from fwriter.core.api.models import Chapter, Revision, RevisionInfo
-from fwriter.core.storage import ChapterStorage
+from fwriter.core.api.models import (
+    Chapter,
+    Fic,
+    Revision,
+    RevisionInfo,
+    SlimChapterInfo,
+)
+from fwriter.core.storage import ChapterMeta, ChapterStorage
 from fwriter.core.sync import publish_chapter, sync_chapter
 
 FIC, CH = "1001", "2001"
@@ -176,6 +182,19 @@ def test_publish_sends_and_moves_base(tmp_path):
     assert storage.read_draft(FIC, CH) == "Новое."
 
 
+def test_publish_trims_draft_edges_like_site(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    api = SavingAPI(rev("Старое."))
+    sync(api, storage)
+    # сайт срезает края сам; U+00A0 внутри остаётся
+    storage.write_draft(FIC, CH, " \t\r\nНовое - да.  \n\n")
+
+    publish(api, storage)
+    assert api.sent == [("Новое - да.", "Глава", "Старое.")]
+    assert storage.read_draft(FIC, CH) == "Новое - да."
+    assert sync(api, storage).kind == "same"
+
+
 class HistoryDownAPI(SavingAPI):
     """После отправки история не отвечает."""
 
@@ -284,3 +303,67 @@ def test_site_version_keeps_site_title(tmp_path):
         "Глава",
         "Глава",
     ]
+
+
+NEW_MINE = "/home/versions/mine/1001/parts/2002/history"
+
+
+class CreatingAPI(FakeAPI):
+    """create_chapter даёт главе id 2002; дальше она видна как обычная."""
+
+    def __init__(self) -> None:
+        super().__init__(rev(""))
+        self.created: list[tuple[str, str]] = []
+
+    async def create_chapter(self, fic_id: str, title: str, content: str) -> str:
+        self.created.append((title, content))
+        self.last = rev(content, "2026-10-29T12:00:00")
+        return "2002"
+
+    async def get_chapter(self, fic_id: str, chapter_id: str) -> Chapter:
+        self.calls.append("chapter")
+        return Chapter(self.title, self.last.content, True, 1, NEW_MINE)
+
+
+def test_create_chapter_deleted_on_site(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_fic(Fic(FIC, "Работа", [], False), "author")
+    # глава, удалённая на сайте: base и история от прежней главы
+    sync(FakeAPI(rev("Старое.")), storage)
+    storage.write_draft(FIC, CH, "Новое.")
+    api = CreatingAPI()
+
+    published = asyncio.run(publish_chapter(api, storage, FIC, CH, "Глава", True))
+    assert api.created == [("Глава", "Новое.")]
+    assert published.created == "2002" and published.renamed
+    assert not (tmp_path / "fics" / FIC / CH).exists()
+    assert storage.read_fic(FIC)[0].chapters == [SlimChapterInfo("2002", "Глава")]
+    meta = storage.read_chapter(FIC, "2002")
+    # история - новой главы, а не удалённой
+    assert meta.history_url == NEW_MINE and api.calls[1] == NEW_MINE
+    assert published.rev is not None and meta.base == published.rev.file
+    assert storage.read_version(FIC, "2002", published.rev.file) == "Новое."
+
+
+def test_create_chapter_keeps_draft_when_rename_fails(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_fic(Fic(FIC, "Работа", [], False), "author")
+    storage.write_chapter(FIC, "new-1", ChapterMeta("Глава"))
+    storage.write_draft(FIC, "new-1", "Новое.")
+    # папка с id новой главы уже есть: rename_chapter откажет
+    (tmp_path / "fics" / FIC / "2002").mkdir()
+    api = CreatingAPI()
+
+    published = asyncio.run(publish_chapter(api, storage, FIC, "new-1", "Глава", True))
+    assert api.created == [("Глава", "Новое.")]
+    assert published.created == "2002" and not published.renamed
+    assert storage.read_draft(FIC, "new-1") == "Новое."
+
+
+def test_create_chapter_stops_on_markup(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_chapter(FIC, "new-1", ChapterMeta("Глава"))
+    storage.write_draft(FIC, "new-1", "<b>")
+    api = CreatingAPI()
+    published = asyncio.run(publish_chapter(api, storage, FIC, "new-1", "Глава", True))
+    assert published.error is not None and api.created == []

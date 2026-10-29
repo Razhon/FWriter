@@ -37,6 +37,7 @@ from fwriter.screens.main import (
     FIC_SECTIONS,
     ChapterButton,
     ClickableLabel,
+    NewChapterButton,
     TrashButton,
 )
 from fwriter.screens.menu import MenuScreen
@@ -1225,6 +1226,86 @@ def test_new_chapters_shown_online(tmp_path):
     asyncio.run(run())
 
 
+def test_new_chapter_created_on_site(tmp_path, monkeypatch):
+    api = api_without_fics()
+    storage = ChapterStorage(tmp_path)
+
+    async def fake_get_fics(role: str) -> list[Fic]:
+        return [FIC] if role == "author" else []
+
+    api.get_fics = fake_get_fics
+    main = MainScreen(api, storage)
+    sent: list[tuple[str, bool]] = []
+
+    async def published(api, storage, fic_id, chapter_id, title, create=False):
+        sent.append((chapter_id, create))
+        storage.rename_chapter(fic_id, chapter_id, "2002", title)
+        first = Synced("same", "Текст.")
+        return Published(first, None, first, None, created="2002")
+
+    monkeypatch.setattr("fwriter.screens.main.publish_chapter", published)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            main.query_one(NewChapterButton).press()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert chapter_titles(main) == ["Глава", "Глава 2 (не отправлена)"]
+            tab = main.query_one(ChapterTab)
+            assert (tab.chapter_id, tab.title_input.value) == ("new-1", "Глава 2")
+            await pilot.press("f5")
+            note = list(pilot.app._notifications)[-1].message
+            assert note == "Нажмите F5 ещё раз, чтобы создать главу на сайте"
+            await pilot.press("f5")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert sent == [("new-1", True)]
+            [tab] = main.query(ChapterTab)
+            assert tab.chapter_id == "2002" and not tab.creates
+            assert main.query_one(TabbedContent).active == tab.id
+            assert chapter_titles(main) == ["Глава", "Глава 2"]
+            messages = [n.message for n in pilot.app._notifications]
+            assert "Глава создана на сайте как черновик" in messages
+
+    asyncio.run(run())
+
+
+def test_created_but_not_renamed_blocks_publish(tmp_path, monkeypatch):
+    api = api_without_fics()
+    storage = ChapterStorage(tmp_path)
+
+    async def fake_get_fics(role: str) -> list[Fic]:
+        return [FIC] if role == "author" else []
+
+    api.get_fics = fake_get_fics
+    main = MainScreen(api, storage)
+
+    async def published(api, storage, fic_id, chapter_id, title, create=False):
+        return Published(Synced("same", ""), created="2002", renamed=False)
+
+    monkeypatch.setattr("fwriter.screens.main.publish_chapter", published)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            # двойной клик: второе нажатие приходит уже от снятой кнопки
+            btn = main.query_one(NewChapterButton)
+            btn.press()
+            btn.press()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert chapter_titles(main) == ["Глава", "Глава 2 (не отправлена)"]
+            await pilot.press("f5", "f5")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            tab = main.query_one(ChapterTab)
+            assert tab.chapter_id == "new-1" and not tab.publishable
+            assert not main.check_action("publish", ())
+
+    asyncio.run(run())
+
+
 def test_saved_login_without_network_goes_offline(tmp_path, monkeypatch):
     monkeypatch.setattr(SecretStorage, "get_auth", lambda: ({"rme": "1"}, "ua"))
     offline_storage(tmp_path)
@@ -1510,7 +1591,9 @@ def test_f5_publishes_with_tab_locked(tmp_path, monkeypatch, error):
     main = MainScreen(api_without_fics(), storage)
     seen: list[tuple[str, bool]] = []
 
-    async def published(api, storage, fic_id, chapter_id, title) -> Published:
+    async def published(
+        api, storage, fic_id, chapter_id, title, create=False
+    ) -> Published:
         tab = main.query_one(ChapterTab)
         seen.append((storage.read_draft(fic_id, chapter_id), tab.editor.read_only))
         first = Synced("same", "Текст.!")
@@ -1682,5 +1765,10 @@ def test_tag_keys_in_editor(tmp_path):
             await pilot.press("tab")
             assert editor.text == "<b>a</b><u>b</u>"
             assert main.focused is not editor
+            # длинное и среднее тире подсвечены разным фоном, дефис - нет
+            editor.load_text("a-b—c–d")
+            spans = editor.get_line(0).spans
+            assert [(s.start, s.end) for s in spans] == [(3, 4), (5, 6)]
+            assert spans[0].style != spans[1].style
 
     asyncio.run(run())

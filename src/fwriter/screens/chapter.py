@@ -24,8 +24,13 @@ STATUSES = {1: "черновик", 2: "опубликована", 3: "отлож
 class ChapterEditor(TextArea):
     """Сырая разметка: клавиши тегов и подсветка тегов, которые видит читатель."""
 
-    # цвет каждого тега - в main.tcss
-    COMPONENT_CLASSES: ClassVar[set[str]] = {f"chapter-editor--{t}" for t in TAGS}
+    # длинное и среднее тире в моноширинном шрифте не отличить от дефиса
+    DASHES: ClassVar[dict[str, str]] = {"—": "emdash", "–": "endash"}
+
+    # цвет каждого тега и фон тире - в main.tcss
+    COMPONENT_CLASSES: ClassVar[set[str]] = {
+        f"chapter-editor--{t}" for t in (*TAGS, *DASHES.values())
+    }
 
     # ctrl+e у TextArea - конец строки, его дублирует End
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -76,6 +81,12 @@ class ChapterEditor(TextArea):
                 f"chapter-editor--{name}", partial=True
             )
             line.stylize(style, start, end)
+        for i, ch in enumerate(line.plain):
+            if name := self.DASHES.get(ch):
+                style = self.get_component_rich_style(
+                    f"chapter-editor--{name}", partial=True
+                )
+                line.stylize(style, i, i + 1)
         return line
 
     # f6 и f7 у TextArea - выделение строки и всего текста, а у нас статус и режим
@@ -127,11 +138,13 @@ class ChapterTab(TabPane):
         readonly: bool = False,
         syncing: bool = False,
         publishable: bool = False,
+        creates: bool = False,
     ) -> None:
         """meta None: chapter.json повреждён, название не сохраняется, чтобы не затереть его.
 
         syncing: идёт синхронизация, правки закрыты до synced().
-        publishable: глава есть на сайте, и её можно отправить по F5.
+        publishable: главу можно отправить по F5.
+        creates: главы нет на сайте (new-N или удалена там), F5 создаст её.
         """
         self.storage = storage
         self.fic_id = fic_id
@@ -140,6 +153,7 @@ class ChapterTab(TabPane):
         self.readonly = readonly
         self.syncing = syncing
         self.publishable = publishable
+        self.creates = creates
         self.site_status: int | None = None
         self.save_timer: Timer | None = None
         # ссылки, а не query_one: в on_unmount дочерние виджеты уже сняты

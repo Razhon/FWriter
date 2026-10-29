@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from functools import partial
 from typing import ClassVar, Literal
 
@@ -25,7 +26,12 @@ from textual.widgets import (
 from textual.widgets._tabbed_content import ContentTab
 
 from ..core.api.client import FicbookAPI
-from ..core.api.errors import FicbookAPIError, NetworkError, UserNotLoggedInError
+from ..core.api.errors import (
+    FicbookAPIError,
+    NetworkError,
+    SiteRejectedError,
+    UserNotLoggedInError,
+)
 from ..core.api.models import Fic, Role, SlimChapterInfo, can_manage
 from ..core.catalog import plan_fic
 from ..core.storage import DATA_DIR, ChapterMeta, ChapterStorage
@@ -212,13 +218,33 @@ class ChapterButton(ClickableLabel):
             self.trash.action_press()
 
 
+class NewChapterButton(ClickableLabel):
+    class Create(Message):
+        """Нажата "Новая глава"; создаёт MainScreen."""
+
+        def __init__(self, button: NewChapterButton) -> None:
+            self.button = button
+            super().__init__()
+
+    def __init__(self, fic: Fic, role: Role) -> None:
+        self.fic = fic
+        self.role: Role = role
+        super().__init__(
+            "[bold]Новая глава ->[/]", classes="new_chapter_btn", markup=True
+        )
+
+    def press(self) -> None:
+        self.post_message(NewChapterButton.Create(self))
+
+
 class FicCollapsible(Collapsible):
     """Работа в списке; gone_fic - её нет на сайте."""
 
     def __init__(
-        self, *children: Widget, fic: Fic, gone_fic: bool, classes: str
+        self, *children: Widget, fic: Fic, role: Role, gone_fic: bool, classes: str
     ) -> None:
         self.fic = fic
+        self.role: Role = role
         self.gone_fic = gone_fic
         super().__init__(
             *children,
@@ -274,15 +300,13 @@ def fic_collapsible(
             )
         )
     if can_manage(role, fic.readonly):
-        chapters.append(
-            ClickableLabel(
-                "[bold]Новая глава ->[/]",
-                classes="new_chapter_btn",
-                markup=True,
-            )
-        )
+        chapters.append(NewChapterButton(fic, role))
     return FicCollapsible(
-        *chapters, fic=fic, gone_fic=gone_fic, classes=f"{role}_fics_collapsible"
+        *chapters,
+        fic=fic,
+        role=role,
+        gone_fic=gone_fic,
+        classes=f"{role}_fics_collapsible",
     )
 
 
@@ -433,6 +457,24 @@ class StartPageTab(TabPane):
         """Работа вместе с локальными главами: удалёнными на сайте и new-N."""
         gone = self.gone_chapters(fic) if find_gone else []
         return fic_collapsible(fic, role, gone, self.storage.new_chapters(fic.id))
+
+    async def refresh_fic(
+        self, fic_id: str, added: SlimChapterInfo | None = None
+    ) -> None:
+        """Список глав работы заново; added - глава, только что созданная на сайте."""
+        container = self.query_one(".fics_container", VerticalScroll)
+        for old in list(self.query(FicCollapsible)):
+            if old.fic.id != fic_id or old.gone_fic:
+                continue
+            fic = old.fic
+            if added is not None and all(ch.id != added.id for ch in fic.chapters):
+                fic = replace(fic, chapters=[*fic.chapters, added])
+            new = self.collapsible(fic, old.role, find_gone=not fic.readonly)
+            if not old.collapsed:
+                new.collapsed = False
+                new.remove_class("-collapsed")
+            await container.mount(new, after=old)
+            await old.remove()
 
     async def show_gone(self, seen: set[str]) -> None:
         """Работы из fic.json, которых нет ни в одном списке сайта: черновики остаются."""
@@ -644,8 +686,9 @@ class MainScreen(Screen):
     def action_start_page(self) -> None:
         tabbed = self.query_one(TabbedContent)
         tabbed.active = "start_page"
-        # фокус из скрытой вкладки главы вернул бы её обратно
-        tabbed.query_one(Tabs).focus()
+        # фокус из скрытой вкладки главы вернул бы её обратно; сразу, а не focus():
+        # иначе Hide успевает отдать фокус соседу на скрытой вкладке
+        self.set_focus(tabbed.query_one(Tabs))
 
     def on_chapter_button_open(self, message: ChapterButton.Open) -> None:
         self.open_chapter(message.fic, message.chapter, message.role, message.on_site)
@@ -662,8 +705,9 @@ class MainScreen(Screen):
 
         def show() -> None:
             tabbed.active = tab_id
-            # фокус с нажатой главы на скрытой стартовой вкладке вернул бы её обратно
-            tabbed.query_one(f"#{tab_id}", ChapterTab).editor.focus()
+            # фокус с нажатой главы на скрытой стартовой вкладке вернул бы её обратно;
+            # сразу, а не focus(): иначе Hide отдаёт его соседней кнопке
+            self.set_focus(tabbed.query_one(f"#{tab_id}", ChapterTab).editor)
 
         if tabbed.query(f"#{tab_id}"):
             show()
@@ -697,7 +741,8 @@ class MainScreen(Screen):
             title_editable=can_manage(role, fic.readonly),
             readonly=fic.readonly,
             syncing=syncing,
-            publishable=syncing and not fic.readonly,
+            publishable=not fic.readonly and (syncing or not on_site),
+            creates=not on_site,
         )
         await tabbed.add_pane(tab)
         show()
@@ -757,11 +802,25 @@ class MainScreen(Screen):
         pane = self.query_one(TabbedContent).active_pane
         if not isinstance(pane, ChapterTab):
             return
+        if pane.creates and not pane.title_editable:
+            self.notify(
+                "Главы нет на сайте, а создавать главы в этой работе вам нельзя",
+                severity="warning",
+            )
+            return
         armed, self.publish_armed = self.publish_armed, None
         delay = TrashButton.CONFIRM_DELAY
         if armed is None or armed[0] is not pane or time.monotonic() - armed[1] > delay:
             self.publish_armed = (pane, time.monotonic())
-            self.notify("Нажмите F5 ещё раз, чтобы отправить", timeout=delay)
+            prompt = "Нажмите F5 ещё раз, чтобы отправить"
+            if pane.creates and pane.chapter_id.startswith("new-"):
+                prompt = "Нажмите F5 ещё раз, чтобы создать главу на сайте"
+            elif pane.creates:
+                prompt = (
+                    "Глава удалена на сайте. "
+                    "Нажмите F5 ещё раз, чтобы создать её заново"
+                )
+            self.notify(prompt, timeout=delay)
             return
         if pane.save():
             self.publish(pane)
@@ -772,7 +831,7 @@ class MainScreen(Screen):
         if self.api is None:
             return
         tab.exchanging("Отправляем…")
-        status, error = tab.site_status, None
+        status, error, created = tab.site_status, None, None
         try:
             published = await publish_chapter(
                 self.api,
@@ -780,9 +839,17 @@ class MainScreen(Screen):
                 tab.fic_id,
                 tab.chapter_id,
                 tab.title_input.value,
+                tab.creates,
             )
         except FicbookAPIError as e:
             report_api_error(self, e, "Не удалось отправить главу")
+            # глава могла создаться до ошибки; не создана наверняка только при отказе сайта
+            if tab.creates and not isinstance(e, SiteRejectedError):
+                self.notify(
+                    "Проверьте на сайте, не создалась ли глава, прежде чем "
+                    "отправлять её снова",
+                    severity="warning",
+                )
         except OSError, ValueError:
             log.warning(
                 "глава %s/%s не отправлена", tab.fic_id, tab.chapter_id, exc_info=True
@@ -794,23 +861,45 @@ class MainScreen(Screen):
         else:
             synced = published.after or published.first
             status, error = synced.status, published.error
+            if published.renamed:
+                created = published.created
             self.report_synced(published.first)
-            if published.unchanged:
+            if not published.renamed:
+                # повторная отправка старой папки создала бы на сайте дубль
+                tab.publishable = False
+                self.notify(
+                    "Глава создана на сайте, но черновик не перенесён: ошибка на диске. "
+                    "Не отправляйте его снова - на сайте появится вторая такая глава",
+                    severity="error",
+                    timeout=30,
+                )
+            elif published.unchanged:
                 self.notify("Глава не отличается от сайта, отправлять нечего")
+            elif published.created is not None:
+                if published.after is not None:
+                    self.report_synced(published.after)
+                # история догонится при следующем открытии: это не ошибка
+                self.notify("Глава создана на сайте как черновик")
             elif published.after is not None:
                 self.report_synced(published.after)
                 v = published.rev
-                self.notify(
-                    "Отправлено"
-                    if v is None
-                    else f"Отправлено (правка номер {v.site_num})"
-                )
+                if v is None:
+                    self.notify("Отправлено")
+                else:
+                    self.notify(f"Отправлено (правка номер {v.site_num})")
             elif published.first.kind != "merge" and error is None:
                 self.notify(
                     "Отправлено, но историю правок перечитать не удалось",
                     severity="warning",
                 )
         if not tab.is_attached:
+            return
+        if created is not None:
+            title = tab.title_input.value
+            await self.reopen(tab, created, status)
+            await self.query_one(StartPageTab).refresh_fic(
+                tab.fic_id, SlimChapterInfo(created, title)
+            )
             return
         # после ошибки на диске мог остаться текст fast-forward
         try:
@@ -825,6 +914,62 @@ class MainScreen(Screen):
                 f"Ошибка разметки, строка {error.line + 1}: {error.message}",
                 severity="error",
             )
+
+    async def reopen(
+        self, tab: ChapterTab, chapter_id: str, status: int | None
+    ) -> None:
+        """Вкладка главы под новым id: id виджета не меняется."""
+        tabbed = self.query_one(TabbedContent)
+        title = tab.title_input.value
+        try:
+            text = self.storage.read_draft(tab.fic_id, chapter_id)
+        except OSError, ValueError:
+            text = None
+        new = ChapterTab(
+            self.storage,
+            tab.fic_id,
+            chapter_id,
+            tab.editor.text if text is None else text,
+            self.read_meta(tab.fic_id, chapter_id, title),
+            title,
+            title_editable=tab.title_editable,
+            readonly=tab.readonly,
+            publishable=True,
+        )
+        new.site_status = status
+        active = tabbed.active == tab.id
+        cursor = tab.editor.cursor_location
+        # старой папки уже нет: запись при снятии вкладки ушла бы в новую
+        tab.chapter_id = chapter_id
+        await tabbed.add_pane(new, after=tab)
+        await tabbed.remove_pane(tab.id or "")
+        if active:
+            tabbed.active = new.id or ""
+            new.editor.cursor_location = cursor
+            self.set_focus(new.editor)
+
+    async def on_new_chapter_button_create(
+        self, message: NewChapterButton.Create
+    ) -> None:
+        btn = message.button
+        # второе нажатие двойного клика: список уже перестроен, кнопка снята
+        if not btn.is_attached:
+            return
+        # номер - по строкам списка, вместе с удалёнными на сайте и не отправленными
+        title = f"Глава {btn.query_ancestor(FicCollapsible).chapter_count() + 1}"
+        try:
+            chapter_id = self.storage.new_chapter_id(btn.fic.id)
+            self.storage.write_chapter(btn.fic.id, chapter_id, ChapterMeta(title))
+            self.storage.write_draft(btn.fic.id, chapter_id, "")
+        except OSError:
+            log.warning("новая глава в %s не создана", btn.fic.id, exc_info=True)
+            self.notify(
+                "Не удалось создать главу\nОшибка записи на диске", severity="error"
+            )
+            return
+        fic, role = btn.fic, btn.role
+        await self.query_one(StartPageTab).refresh_fic(fic.id)
+        self.open_chapter(fic, SlimChapterInfo(chapter_id, title), role, on_site=False)
 
     def action_status(self) -> None:
         pane = self.query_one(TabbedContent).active_pane
