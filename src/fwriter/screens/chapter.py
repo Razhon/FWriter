@@ -89,6 +89,8 @@ class ChapterTab(TabPane):
         self.disk_text = text
         self.newlines_changed = self.saved_text != text
         self.base_text = self.read_base(meta)
+        # count() на длинной главе - десятки мс: пересчёт при сохранении, не на каждую клавишу
+        self.counts = count(self.saved_text)
 
     def read_base(self, meta: ChapterMeta | None) -> str | None:
         """Текст сайта, от которого ведётся черновик; None - не с чем сравнить."""
@@ -133,7 +135,7 @@ class ChapterTab(TabPane):
                 parts.append(
                     "как на сайте" if draft == self.base_text else "есть правки"
                 )
-        chars, words = count(text)
+        chars, words = self.counts
         parts.append(f"{chars} зн., {words} сл.")
         return " · ".join(parts)
 
@@ -203,7 +205,8 @@ class ChapterTab(TabPane):
             if text != self.saved_text:
                 self.storage.write_draft(self.fic_id, self.chapter_id, text)
                 self.saved_text = self.disk_text = text
-            if self.saved_title is not None and title != self.saved_title:
+            # пустое поле - правка ещё идёт: hide_title вернёт прежнее название
+            if self.saved_title is not None and title and title != self.saved_title:
                 self.storage.set_title(self.fic_id, self.chapter_id, title)
                 self.saved_title = title
         # ValueError: chapter.json повредили, пока вкладка открыта
@@ -219,6 +222,7 @@ class ChapterTab(TabPane):
             return False
         finally:
             if self.is_attached:
+                self.counts = count(text)
                 self.post_message(self.InfoChanged(self))
         return True
 

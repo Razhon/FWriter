@@ -604,9 +604,9 @@ def test_click_while_loading_sends_one_request(tmp_path):
             assert main.query_one(TabbedContent).active == tab.id
             assert main.focused is tab.editor
             assert tab.title_input.disabled and tab.status.display
-            # повторное нажатие переключает на ту же вкладку
+            # повторное нажатие переключает на ту же вкладку, закрыть её до конца нельзя
             main.open_chapter(FIC, FIC.chapters[0], "author")
-            await pilot.pause()
+            await pilot.press("ctrl+w")
             assert len(main.query(ChapterTab)) == 1
 
             response.set()
@@ -670,8 +670,28 @@ def test_open_chapter_syncs(tmp_path, monkeypatch, result, note: str):
             await open_chapter(pilot, main)
             # при ошибке сайта открывается локальный черновик
             expected = "Текст." if isinstance(result, Exception) else result.text
-            assert main.query_one(ChapterTab).editor.text == expected
+            editor = main.query_one(ChapterTab).editor
+            assert editor.text == expected and not editor.read_only
             assert note in [n.message for n in pilot.app._notifications]
+
+    asyncio.run(run())
+
+
+def test_open_chapter_without_draft_closes_on_sync_error(tmp_path, monkeypatch):
+    main = MainScreen(api_without_fics(), ChapterStorage(tmp_path))
+
+    async def synced(*args) -> Synced:
+        raise NetworkError("Нет связи с сайтом")
+
+    monkeypatch.setattr("fwriter.screens.main.sync_chapter", synced)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            assert not main.query(ChapterTab)
+            messages = [n.message for n in pilot.app._notifications]
+            assert "Не удалось скачать главу\nНет связи с сайтом" in messages
 
     asyncio.run(run())
 
@@ -760,8 +780,16 @@ def test_chapter_info_and_rename(tmp_path, monkeypatch):
                 "опубликована · сохранено · как на сайте · 12 зн., 2 сл."
             )
 
+            # символы и слова пересчитываются при сохранении
             await pilot.press("!")
-            assert str(info.render()).startswith("опубликована · не сохранено · есть")
+            assert str(info.render()) == (
+                "опубликована · не сохранено · есть правки · 12 зн., 2 сл."
+            )
+            assert tab.save()
+            await pilot.pause()
+            assert str(info.render()).endswith(
+                "сохранено · есть правки · 13 зн., 2 сл."
+            )
 
             # F2 открывает название, Enter прячет его и возвращает в текст
             await pilot.press("f2")
@@ -770,8 +798,11 @@ def test_chapter_info_and_rename(tmp_path, monkeypatch):
             assert not tab.title_input.display and main.focused is tab.editor
             assert str(main.query_one(TabbedContent).get_tab(tab).label) == "Глава?"
 
-            # пустое название не остаётся
-            await pilot.press("f2", "ctrl+u", "escape")
+            # пустое название не остаётся ни на диске, ни в поле
+            await pilot.press("f2", "ctrl+u")
+            assert tab.save()
+            assert storage.read_chapter("00000000", "00000000").title == "Глава"
+            await pilot.press("escape")
             assert tab.title_input.value == "Глава?"
 
             await pilot.press("f1")

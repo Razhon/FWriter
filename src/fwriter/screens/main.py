@@ -546,9 +546,15 @@ class MainScreen(Screen):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
         # на стартовой вкладке F1 некуда переходить, а закрыть её нельзя
-        if action in ("start_page", "close_chapter"):
-            # до compose вкладок ещё нет
-            return any(t.active != "start_page" for t in self.query(TabbedContent))
+        # до compose вкладок ещё нет
+        if action in ("start_page", "close_chapter") and not any(
+            t.active != "start_page" for t in self.query(TabbedContent)
+        ):
+            return False
+        if action == "close_chapter":
+            # закрытую до конца синхронизации главу повторный клик не открыл бы
+            pane = self.query_one(TabbedContent).active_pane
+            return not (isinstance(pane, ChapterTab) and pane.syncing)
         return True
 
     def on_tabbed_content_tab_activated(self) -> None:
