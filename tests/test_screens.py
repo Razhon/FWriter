@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 from textual.app import App
 from textual.geometry import Region
-from textual.widgets import Button, Collapsible, Input, Label, Log, TabbedContent
+from textual.widgets import Collapsible, Input, Label, Log, TabbedContent
 from textual.widgets._collapsible import CollapsibleTitle
 from textual.widgets.text_area import Selection
 
@@ -21,7 +21,7 @@ from fwriter.core.api.errors import (
 )
 from fwriter.core.api.models import Chapter, Fic, SlimChapterInfo, UserInfo
 from fwriter.core.markup import MarkupError
-from fwriter.core.merge import merge3
+from fwriter.core.merge import Manual, merge3
 from fwriter.core.storage import ChapterStorage, MergeChoice, Version
 from fwriter.core.sync import Published, Synced
 from fwriter.run import FWriterApp, setup_logging
@@ -1820,11 +1820,12 @@ def test_merge_screen_writes_result(tmp_path, monkeypatch):
             await pilot.app.workers.wait_for_complete()
             main.open_chapter(FIC, FIC.chapters[0], "author")
             screen = await wait_merge_screen(pilot)
-            done = screen.query_one("#merge_done", Button)
-            # конфликт в первом абзаце не разобран
-            assert done.disabled
+            # конфликт в первом абзаце не разобран: Ctrl+S не закрывает экран
+            assert screen.check_action("done", ()) is None
+            await pilot.press("ctrl+s")
+            assert pilot.app.screen is screen
             await pilot.press("2")
-            assert not done.disabled
+            assert screen.check_action("done", ())
             # Esc откладывает: черновик прежний, F4 возвращает решение
             await pilot.press("escape")
             await pilot.app.workers.wait_for_complete()
@@ -1835,7 +1836,7 @@ def test_merge_screen_writes_result(tmp_path, monkeypatch):
             assert screen.choices == {0: "site"}
             # набрано до MergeScreen, автосохранение ещё не сработало
             main.query_one(ChapterTab).editor.insert("Ещё. ", (0, 0))
-            await pilot.click("#merge_done")
+            await pilot.press("ctrl+s")
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
 
@@ -1887,6 +1888,73 @@ def test_merge_screen_ignores_keys_in_empty_filter():
             await pilot.press("1", "e")
             assert screen.choices == {}
             assert pilot.app.screen is screen
+
+    asyncio.run(run())
+
+
+def test_merge_screen_manual_inline():
+    screen = MergeScreen("Глава", merge3("Было.", "Сайт.", "Моё."), {}, [])
+
+    async def run():
+        async with App().run_test(size=(100, 30)) as pilot:
+            pilot.app.push_screen(screen)
+            await pilot.pause()
+            # редактор под вариантами начат с черновика; 1 - текст, а не решение
+            await pilot.press("e", "end", "1")
+            editor = screen.query_one("#merge_editor", ChapterEditor)
+            assert pilot.app.focused is editor
+            assert editor.text == "Моё.1"
+            assert not screen.has_class("-side")
+            assert screen.query_one("#merge_list").disabled
+            # Esc отменяет только правку, экран остаётся
+            await pilot.press("escape")
+            assert pilot.app.screen is screen
+            assert screen.choices == {}
+            assert not screen.query_one("#merge_list").disabled
+            await pilot.press("e", "end", "!", "ctrl+s")
+            assert screen.choices == {0: Manual("Моё.!")}
+            assert pilot.app.screen is screen
+            # повторно - с ручным текстом, клавишей "у" русской раскладки
+            await pilot.press("у")
+            assert pilot.app.focused is editor
+            assert editor.text == "Моё.!"
+
+    asyncio.run(run())
+
+
+def test_merge_screen_long_block_side_by_side():
+    long = " ".join(["Слово"] * 400)
+    parts = merge3(long, long + " сайт", long + " моё")
+    screen = MergeScreen("Глава", parts, {}, [])
+
+    async def run():
+        async with App().run_test(size=(100, 30)) as pilot:
+            pilot.app.push_screen(screen)
+            await pilot.pause()
+            await pilot.press("e")
+            await pilot.pause()
+            # варианты не влезли над редактором
+            assert screen.has_class("-side")
+            assert not screen.query_one("#merge_list").display
+            await pilot.press("ctrl+s")
+            assert not screen.has_class("-side")
+
+    asyncio.run(run())
+
+
+def test_merge_screen_list_click():
+    parts = merge3("А.\n\nБ.", "А1.\n\nБ1.", "А2.\n\nБ.")
+    screen = MergeScreen("Глава", parts, {}, [])
+
+    async def run():
+        async with App().run_test(size=(100, 30)) as pilot:
+            pilot.app.push_screen(screen)
+            await pilot.pause()
+            first, second = screen.hunks
+            assert screen.current == first
+            # вторая правка в списке: 2 строки первой и разделитель
+            await pilot.click("#merge_list", offset=(4, 4))
+            assert screen.current == second
 
     asyncio.run(run())
 

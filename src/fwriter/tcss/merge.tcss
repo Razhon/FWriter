@@ -1,44 +1,161 @@
+#merge_top {
+    height: 1;
+    background: $panel;
+}
+
 #merge_head {
     padding: 0 1;
     text-style: bold;
 }
 
+#merge_count {
+    padding: 0 1;
+    margin-left: 2;
+    background: $warning;
+    color: $background;
+    text-style: bold;
+}
+
 #merge_revs {
     padding: 0 1;
-    max-height: 6;
     color: $text-muted;
+}
+
+#merge_main {
+    height: 1fr;
+}
+
+#merge_list {
+    width: 28;
+    height: 1fr;
+    border: round $panel-lighten-2;
+    border-title-style: bold;
+}
+
+#merge_list > .option-list--option {
+    padding: 0 1;
+}
+
+#merge_right {
+    width: 1fr;
+    padding: 0 1;
+}
+
+#merge_status {
+    height: 1;
+    margin: 1 0;
+}
+
+#merge_kind {
+    padding: 0 1;
+    margin-right: 2;
+    background: $panel-lighten-1;
+    text-style: bold;
+}
+
+#merge_kind.-conflict {
+    background: $warning;
+    color: $background;
+}
+
+#merge_work {
+    height: 1fr;
 }
 
 #merge_body {
     height: 1fr;
-    padding: 0 1;
 }
 
 #merge_body ParagraphDiff {
-    margin-top: 1;
+    margin-bottom: 1;
     padding: 0 1;
-    border-left: thick $panel;
+    border: round $panel-lighten-2;
+    border-title-style: bold;
 }
 
-#merge_done {
-    margin: 0 1;
+#merge_base {
+    color: $text-muted;
 }
 
-ManualScreen {
-    align: center middle;
+#merge_body #merge_site {
+    border: round $primary;
+    border-title-color: $primary;
 }
 
-#manual {
-    width: 90%;
-    height: 80%;
-    border: thick $background 80%;
-    background: $surface;
+#merge_body #merge_mine {
+    border: round $success;
+    border-title-color: $success;
 }
 
-#manual_title {
-    margin: 0 1;
+/* выбранная сторона - жирной рамкой; ручной вариант виден, только когда выбран */
+#merge_body #merge_site.-chosen {
+    border: heavy $primary;
 }
 
-#manual ChapterEditor {
+#merge_body #merge_mine.-chosen {
+    border: heavy $success;
+}
+
+#merge_body #merge_manual {
+    border: heavy $warning;
+    border-title-color: $warning;
+}
+
+#merge_site > .paragraph-diff--mark {
+    text-style: bold;
+    background: $primary-muted;
+}
+
+#merge_mine > .paragraph-diff--mark {
+    text-style: bold;
+    background: $success-muted;
+}
+
+#merge_manual > .paragraph-diff--mark {
+    text-style: bold;
+    background: $warning-muted;
+}
+
+#merge_editor {
+    display: none;
     height: 1fr;
+    min-height: 6;
+    border: heavy $warning;
+    border-title-color: $warning;
+    border-title-style: bold;
+    border-subtitle-color: $warning;
+}
+
+/* ручная правка: редактор под вариантами, "Было" прячется */
+MergeScreen.-editing #merge_editor {
+    display: block;
+}
+
+MergeScreen.-editing #merge_base {
+    display: none;
+}
+
+MergeScreen.-editing #merge_body {
+    height: auto;
+    max-height: 50%;
+}
+
+/* варианты не влезли над редактором: они слева, редактор справа */
+MergeScreen.-side #merge_list {
+    display: none;
+}
+
+MergeScreen.-side #merge_work {
+    layout: horizontal;
+}
+
+MergeScreen.-side #merge_body {
+    width: 1fr;
+    height: 1fr;
+    max-height: 100%;
+    margin-right: 1;
+}
+
+MergeScreen.-side #merge_editor {
+    width: 1fr;
 }
