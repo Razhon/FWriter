@@ -25,13 +25,15 @@ from ..core.sync import (
     load_merge,
     postpone_merge,
     publish_chapter,
+    restore_version,
     start_merge,
     sync_chapter,
 )
 from .api_errors import report_api_error, report_disk_error
+from .diff import DiffScreen, rev_line, version_line
 from .editor import ChapterEditor
 from .menu import MenuScreen
-from .merge import MergeScreen, rev_line, version_line
+from .merge import MergeScreen
 from .widgets import CONFIRM_DELAY
 
 log = logging.getLogger(__name__)
@@ -41,7 +43,7 @@ STATUSES = {1: "черновик", 2: "опубликована", 3: "отлож
 
 
 class ChapterTab(TabPane):
-    """Глава: текст, название по F2, синхронизация, слияние (F4), отправка (F5), статус (F6).
+    """Глава: текст, название по F2, дифф (F3), слияние (F4), отправка (F5), статус (F6).
 
     draft.txt пишется через 2 с после ввода и при закрытии.
     """
@@ -50,6 +52,7 @@ class ChapterTab(TabPane):
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("f2", "rename", "Переименовать"),
+        Binding("f3", "diff", "Дифф"),
         Binding("f4", "review", "Слияние"),
         Binding("f5", "publish", "Отправить"),
         Binding("f6", "status", "Статус"),
@@ -291,6 +294,8 @@ class ChapterTab(TabPane):
             return self.api is not None and self.publishable and not self.busy
         if action == "review":
             return not self.readonly and not self.busy
+        if action == "diff":
+            return not self.busy
         if action == "status":
             return (
                 self.api is not None
@@ -648,6 +653,46 @@ class ChapterTab(TabPane):
             merge, parts, choices, site = loaded
             revs = [] if site is None else [version_line(site)]
             await self.review(merge, parts, choices, revs)
+
+    def action_diff(self) -> None:
+        if self.save():
+            self.show_diff()
+
+    @work(group="merge")
+    async def show_diff(self) -> None:
+        """F3: дифф версий; восстановленная версия - в черновик."""
+        if self.busy:
+            return
+        title = self.title_input.value
+        with self.working():
+            try:
+                meta = self.storage.load_chapter(self.fic_id, self.chapter_id, title)
+            except (OSError, ValueError) as e:
+                report_disk_error(
+                    self, e, "Не удалось прочитать версии главы", self.where
+                )
+                return
+            screen = DiffScreen(
+                self.storage,
+                self.fic_id,
+                self.chapter_id,
+                meta,
+                self.disk_text,
+                not self.readonly,
+            )
+            version = await self.app.push_screen_wait(screen)
+            if version is None:
+                return
+            try:
+                text = restore_version(
+                    self.storage, self.fic_id, self.chapter_id, title, version
+                )
+            except (OSError, ValueError) as e:
+                report_disk_error(self, e, "Не удалось восстановить версию", self.where)
+                return
+            self.set_text(text, self.read_meta())
+            self.post_message(self.InfoChanged(self))
+            self.notify(f"Восстановлена версия: {version_line(version)}")
 
     def action_status(self) -> None:
         if self.site_status is None:

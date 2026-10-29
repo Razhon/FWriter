@@ -1,0 +1,80 @@
+#diff_head {
+    width: 1fr;
+    height: 1;
+    padding: 0 1;
+    background: $panel;
+    text-style: bold;
+}
+
+#diff_pick {
+    height: 8;
+}
+
+#diff_pick OptionList {
+    width: 1fr;
+    height: 1fr;
+    border: round $panel-lighten-2;
+    border-title-style: bold;
+}
+
+#diff_pick OptionList:focus {
+    border: round $accent;
+}
+
+#diff_body {
+    height: 1fr;
+    padding: 0 1;
+}
+
+.diff-empty {
+    margin: 1;
+    color: $text-muted;
+}
+
+.diff-block {
+    height: auto;
+    margin-top: 1;
+    border-left: blank;
+}
+
+/* текущий блок - полосой слева */
+.diff-block.-current {
+    border-left: thick $accent;
+}
+
+.diff-note {
+    padding: 0 1;
+    color: $text-muted;
+}
+
+/* рамка по ширине текста, длинный абзац переносится */
+.diff-block ParagraphDiff {
+    width: auto;
+    max-width: 100%;
+    padding: 0 1;
+    border-title-style: bold;
+}
+
+.diff-block .diff-old {
+    border: round $error 50%;
+    border-title-color: $error;
+}
+
+.diff-block .diff-new {
+    border: round $success 50%;
+    border-title-color: $success;
+}
+
+.diff-old {
+    color: $text-muted;
+}
+
+.diff-old > .paragraph-diff--mark {
+    text-style: bold strike;
+    background: $error-muted;
+}
+
+.diff-new > .paragraph-diff--mark {
+    text-style: bold;
+    background: $success-muted;
+}

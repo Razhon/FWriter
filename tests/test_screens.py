@@ -34,10 +34,10 @@ from fwriter.screens import (
 )
 from fwriter.screens.api_errors import report_api_error
 from fwriter.screens.chapter import ChapterTab
-from fwriter.screens.diff import diff_text
+from fwriter.screens.diff import DiffScreen, aligned, diff_text, rev_line
 from fwriter.screens.editor import ChapterEditor
 from fwriter.screens.menu import MenuScreen
-from fwriter.screens.merge import MergeScreen, rev_line
+from fwriter.screens.merge import MergeScreen
 from fwriter.screens.start_page import (
     FIC_SECTIONS,
     ChapterButton,
@@ -1251,8 +1251,7 @@ def test_new_chapter_created_on_site(tmp_path, monkeypatch):
         async with MainScreenApp(main).run_test() as pilot:
             await pilot.app.workers.wait_for_complete()
             main.query_one(NewChapterButton).press()
-            await pilot.app.workers.wait_for_complete()
-            await pilot.pause()
+            await wait_new_chapter_tab(pilot, main)
             assert chapter_titles(main) == ["Глава", "Глава 2 (не отправлена)"]
             tab = main.query_one(ChapterTab)
             assert (tab.chapter_id, tab.title_input.value) == ("new-1", "Глава 2")
@@ -1304,8 +1303,7 @@ def test_created_but_not_renamed_blocks_publish(tmp_path, monkeypatch):
             btn = main.query_one(NewChapterButton)
             btn.press()
             btn.press()
-            await pilot.app.workers.wait_for_complete()
-            await pilot.pause()
+            await wait_new_chapter_tab(pilot, main)
             assert chapter_titles(main) == ["Глава", "Глава 2 (не отправлена)"]
             await pilot.press("f5", "f5")
             await pilot.app.workers.wait_for_complete()
@@ -1659,7 +1657,7 @@ def test_footer_order_in_chapter(tmp_path):
             await pilot.app.workers.wait_for_complete()
             await open_chapter(pilot, main)
             shown = [b.key for _, b, *_ in main.active_bindings.values() if b.show]
-            assert shown[:4] == ["f1", "f2", "f4", "f5"]
+            assert shown[:5] == ["f1", "f2", "f3", "f4", "f5"]
 
     asyncio.run(run())
 
@@ -1789,6 +1787,17 @@ def test_tag_keys_in_editor(tmp_path):
     asyncio.run(run())
 
 
+async def wait_new_chapter_tab(pilot, main: MainScreen) -> None:
+    # Create всплывает до MainScreen через очереди виджетов, а open_chapter стартует
+    # только после refresh_fic: до этого wait_for_complete ждать нечего
+    for _ in range(50):
+        await pilot.pause()
+        if main.query(ChapterTab):
+            break
+    await pilot.app.workers.wait_for_complete()
+    await pilot.pause()
+
+
 async def wait_merge_screen(pilot) -> MergeScreen:
     # воркер слияния ждёт экран: wait_for_complete не дождался бы его
     for _ in range(50):
@@ -1859,6 +1868,105 @@ def test_merge_screen_writes_result(tmp_path, monkeypatch):
             await pilot.press("1", "escape")
             await pilot.app.workers.wait_for_complete()
             assert storage.read_draft(*ids) == "Сайт.\n\nОбщее!"
+
+    asyncio.run(run())
+
+
+def test_diff_screen_saves_and_restores(tmp_path, monkeypatch):
+    storage = ChapterStorage(tmp_path)
+    ids = ("00000000", "00000000")
+    base = storage.add_version(*ids, "Было.\n\nОбщее.", "Глава", "site", site_num=1)
+    meta = storage.read_chapter(*ids)
+    storage.write_chapter(*ids, replace(meta, base=base.file))
+    storage.write_draft(*ids, "Стало.\n\nОбщее.")
+    main = MainScreen(api_without_fics(), storage)
+
+    async def synced(*args) -> Synced:
+        return Synced("same", "Стало.\n\nОбщее.")
+
+    monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            await pilot.press("f3")
+            await pilot.pause()
+            screen = pilot.app.screen
+            assert isinstance(screen, DiffScreen)
+            # по умолчанию base против черновика
+            assert [b[1:3] for b in screen.blocks] == [(["Было."], ["Стало."])]
+
+            await pilot.press("s")
+            await pilot.pause()
+            await pilot.press("x", "enter")
+            await pilot.pause()
+            versions = storage.read_chapter(*ids).versions
+            assert versions[-1].comment == "x"
+            assert storage.read_version(*ids, versions[-1].file) == "Стало.\n\nОбщее."
+
+            # смена версии подряд (зажатая стрелка) пересобирает блоки, пока
+            # старые ещё не сняты
+            await pilot.press("tab", "up", "down")
+            screen.compare()
+            screen.compare()
+            await pilot.pause()
+            assert screen.old == base.file
+            assert len(screen.query(".diff-block")) == 1
+
+            await pilot.press("r", "r")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert storage.read_draft(*ids) == "Было.\n\nОбщее."
+            assert main.query_one(ChapterTab).editor.text == "Было.\n\nОбщее."
+            meta = storage.read_chapter(*ids)
+            assert meta.restored == base.file
+            # черновик уже был версией по S: второго снимка нет
+            assert len(meta.versions) == len(versions)
+
+    asyncio.run(run())
+
+
+def test_diff_screen_filter_survives_version_change(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    ids = ("00000000", "00000000")
+    base = storage.add_version(*ids, "А.\nБ.\nВ.", "Глава", "site", site_num=1)
+    meta = replace(storage.read_chapter(*ids), base=base.file)
+    # первый блок - вставленная пустая строка, правка оформления
+    screen = DiffScreen(storage, *ids, meta, "А.\n\nБ.\nГ.", True)
+
+    async def run():
+        async with App().run_test() as pilot:
+            pilot.app.push_screen(screen)
+            await pilot.pause()
+            await pilot.press("f")
+            # смена версии в списке при включённом фильтре
+            screen.compare()
+            await pilot.pause()
+            assert screen.current == 1
+            await pilot.press("down")
+            assert screen.current == 1
+            assert screen.shown[1].has_class("-current")
+
+    asyncio.run(run())
+
+
+def test_diff_screen_unknown_base_and_unread_version(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    ids = ("00000000", "00000000")
+    v = storage.add_version(*ids, "А.", "Глава", "manual")
+    (tmp_path / "fics" / ids[0] / ids[1] / "versions" / v.file).unlink()
+    # base нет среди версий: "Было" - последняя версия, а не падение
+    meta = replace(storage.read_chapter(*ids), base="missing.txt")
+    screen = DiffScreen(storage, *ids, meta, "Б.", True)
+
+    async def run():
+        async with App().run_test() as pilot:
+            pilot.app.push_screen(screen)
+            await pilot.pause()
+            assert screen.old == v.file
+            empty = screen.query_one(".diff-empty", Label)
+            assert str(empty.render()) == "Версию не удалось прочитать"
 
     asyncio.run(run())
 
@@ -1968,3 +2076,16 @@ def test_diff_text_big_block():
     assert text.plain == "\n".join(new)
     marked = [text.plain[s.start : s.end] for s in text.spans if s.style == "reverse"]
     assert marked == ["новый", "\n", "вставка"]
+
+
+def test_aligned_keeps_separators_in_columns():
+    rows = [
+        ("Черновик", "", "", ""),
+        ("черновик", "", "2026-10-30 00:06", "коммент"),
+        ("правка 23", "user-1", "2026-10-30 00:06", ""),
+    ]
+    lines = [t.plain for t in aligned(rows)]
+    # дата у всех с одной колонки, у пустой ячейки разделителя нет
+    assert {line.index("2026") for line in lines[1:]} == {21}
+    assert "·" not in lines[0]
+    assert lines[1].startswith("черновик           · 2026")

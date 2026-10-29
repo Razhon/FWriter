@@ -10,7 +10,6 @@ from textual.widgets import Footer, Label, OptionList
 
 from ..core.markup import tweak_kind
 from ..core.merge import Choice, Hunk, Manual
-from ..core.storage import Version
 from .diff import ParagraphDiff
 from .editor import ChapterEditor
 
@@ -320,17 +319,4 @@ class MergeScreen(Screen[tuple[bool, dict[int, Choice]]]):
             self.dismiss((True, self.choices))
 
 
-def rev_line(num: int | None, author: str | None, created: str, comment: str) -> str:
-    """Правка сайта для шапки MergeScreen."""
-    # у своей версии publish ника нет
-    num_part = None if num is None else f"Правка номер {num}"
-    # у версий сайта created до секунды, в шапке - до минуты
-    parts = (num_part, author, created[:16].replace("T", " "), comment)
-    return " · ".join(p for p in parts if p)
-
-
-def version_line(v: Version) -> str:
-    return rev_line(v.site_num, v.author_name, v.created, v.comment)
-
-
-__all__ = ["MergeScreen", "rev_line", "version_line"]
+__all__ = ["MergeScreen"]

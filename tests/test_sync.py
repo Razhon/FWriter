@@ -19,6 +19,7 @@ from fwriter.core.sync import (
     load_merge,
     postpone_merge,
     publish_chapter,
+    restore_version,
     start_merge,
     sync_chapter,
 )
@@ -420,6 +421,28 @@ def test_merge_without_base_starts_from_empty(tmp_path):
     text = finish_merge(storage, FIC, CH, "Глава", merge, parts, {0: "site"})
     assert text == "Сайт."
     assert storage.read_chapter(FIC, CH).base == synced.site.file
+
+
+def test_restore_version(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    site = storage.add_version(FIC, CH, "Сайт.", "Глава", "site", site_num=1)
+    mine = storage.add_version(FIC, CH, "Своя.", "Глава", "manual")
+    storage.write_draft(FIC, CH, "Черновик.")
+
+    # прежний черновик - версией, ревизия сайта - в restored
+    assert restore_version(storage, FIC, CH, "Глава", site) == "Сайт."
+    assert storage.read_draft(FIC, CH) == "Сайт."
+    meta = storage.read_chapter(FIC, CH)
+    assert meta.restored == site.file
+    assert storage.read_version(FIC, CH, meta.versions[-1].file) == "Черновик."
+
+    # своя версия restored сбрасывает; черновик равен последней версии - без снимка
+    storage.add_version(FIC, CH, "Сайт.", "Глава", "manual")
+    count = len(storage.read_chapter(FIC, CH).versions)
+    assert restore_version(storage, FIC, CH, "Глава", mine) == "Своя."
+    meta = storage.read_chapter(FIC, CH)
+    assert meta.restored is None
+    assert len(meta.versions) == count
 
 
 def test_merge_start_finish_and_review(tmp_path):

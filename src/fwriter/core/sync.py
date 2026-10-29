@@ -183,6 +183,32 @@ def _saved(parts: Parts, choices: dict[int, Choice]) -> list[MergeChoice]:
     return saved
 
 
+def _snapshot(
+    storage: ChapterStorage, fic_id: str, chapter_id: str, meta: ChapterMeta
+) -> Version:
+    """Черновик версией; если он равен последней версии - она."""
+    draft = storage.read_draft(fic_id, chapter_id) or ""
+    last = meta.versions[-1] if meta.versions else None
+    if last and storage.read_version(fic_id, chapter_id, last.file) == draft:
+        return last
+    return storage.add_version(fic_id, chapter_id, draft, meta.title, "manual")
+
+
+def restore_version(
+    storage: ChapterStorage, fic_id: str, chapter_id: str, title: str, v: Version
+) -> str:
+    """6.5: черновик - версией, текст v - в черновик; ревизия сайта - в restored."""
+    text = storage.read_version(fic_id, chapter_id, v.file)
+    _snapshot(
+        storage, fic_id, chapter_id, storage.load_chapter(fic_id, chapter_id, title)
+    )
+    storage.write_draft(fic_id, chapter_id, text)
+    meta = storage.load_chapter(fic_id, chapter_id, title)
+    restored = v.file if v.source == "site" else None
+    storage.write_chapter(fic_id, chapter_id, replace(meta, restored=restored))
+    return text
+
+
 def start_merge(
     storage: ChapterStorage, fic_id: str, chapter_id: str, title: str, site: Version
 ) -> tuple[LastMerge, Parts, dict[int, Choice]]:
@@ -191,13 +217,8 @@ def start_merge(
     Решения - отложенные по Esc. OSError и ValueError - от диска.
     """
     meta = storage.load_chapter(fic_id, chapter_id, title)
-    draft = storage.read_draft(fic_id, chapter_id) or ""
-    last = meta.versions[-1] if meta.versions else None
     # слияние, закрытое без "Готово", начинается заново без второго снимка
-    if last and storage.read_version(fic_id, chapter_id, last.file) == draft:
-        mine = last
-    else:
-        mine = storage.add_version(fic_id, chapter_id, draft, meta.title, "manual")
+    mine = _snapshot(storage, fic_id, chapter_id, meta)
     merge = LastMerge(site.file, mine.file, meta.base)
     parts = _parts(storage, fic_id, chapter_id, merge)
     old = meta.last_merge

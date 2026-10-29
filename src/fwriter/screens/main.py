@@ -27,7 +27,7 @@ class MainScreen(Screen):
         Binding("f1", "start_page", "Начало работы"),
     ]
     # footer иначе идёт по цепочке от фокуса: ^w от TextArea встаёт первым
-    FOOTER_ORDER = ("f1", "f2", "f4", "f5", "f6")
+    FOOTER_ORDER = ("f1", "f2", "f3", "f4", "f5", "f6")
 
     @property
     def active_bindings(self) -> dict[str, ActiveBinding]:

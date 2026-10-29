@@ -31,6 +31,11 @@ class FWriterApp(App):
     main_screen: MainScreen | None = None
     force_quit_until = 0.0
 
+    # Textual печатает traceback только в терминал после выхода; без locals
+    def _handle_exception(self, error: Exception) -> None:
+        log.critical("программа упала", exc_info=error)
+        super()._handle_exception(error)
+
     # ctrl+q; повторное нажатие, пока видна подсказка, выходит без записи
     async def action_quit(self) -> None:
         main = self.main_screen
