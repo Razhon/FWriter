@@ -544,8 +544,7 @@ class MainScreen(Screen):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("f1", "start_page", "Начало работы"),
         Binding("f5", "publish", "Отправить"),
-        # priority: у TextArea на f6 своё select_line
-        Binding("f6", "status", "Статус", priority=True),
+        Binding("f6", "status", "Статус"),
     ]
     # footer иначе идёт по цепочке от фокуса: ^w от TextArea встаёт первым
     FOOTER_ORDER = ("f1", "f2", "f5", "f6")

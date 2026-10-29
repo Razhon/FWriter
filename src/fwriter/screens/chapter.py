@@ -2,6 +2,7 @@ import logging
 from typing import ClassVar
 
 from textual import on
+from textual.actions import SkipAction
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.content import Content
@@ -19,6 +20,13 @@ STATUSES = {1: "черновик", 2: "опубликована", 3: "отлож
 
 
 class ChapterEditor(TextArea):
+    # f6 и f7 у TextArea - выделение строки и всего текста, а у нас статус и режим
+    def action_select_line(self) -> None:
+        raise SkipAction()
+
+    def action_select_all(self) -> None:
+        raise SkipAction()
+
     def on_resize(self) -> None:
         # TextArea переносит строки по Resize без refresh(): строки, нарисованные
         # до этого, остаются со старым переносом до первого сдвига курсора
