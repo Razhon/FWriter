@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 from functools import partial
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from textual import events, on, work
 from textual.app import ComposeResult
@@ -31,7 +31,8 @@ from ..core.catalog import plan_fic
 from ..core.storage import DATA_DIR, ChapterMeta, ChapterStorage
 from ..core.sync import Synced, publish_chapter, sync_chapter
 from .api_errors import report_api_error
-from .chapter import ChapterTab
+from .chapter import STATUSES, ChapterTab
+from .menu import MenuScreen
 
 log = logging.getLogger(__name__)
 
@@ -543,9 +544,25 @@ class MainScreen(Screen):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("f1", "start_page", "Начало работы"),
         Binding("f5", "publish", "Отправить"),
+        # priority: у TextArea на f6 своё select_line
+        Binding("f6", "status", "Статус", priority=True),
     ]
     # footer иначе идёт по цепочке от фокуса: ^w от TextArea встаёт первым
-    FOOTER_ORDER = ("f1", "f2", "f5")
+    FOOTER_ORDER = ("f1", "f2", "f5", "f6")
+    # param главы: действие сайта, пункт меню, текст ошибки
+    STATUS_ACTIONS: ClassVar[
+        dict[
+            int, tuple[Literal["show_part", "hide_part", "disable_auto_pub"], str, str]
+        ]
+    ] = {
+        1: ("show_part", "Опубликовать", "Не удалось опубликовать главу"),
+        2: ("hide_part", "Скрыть в черновики", "Не удалось скрыть главу"),
+        3: (
+            "disable_auto_pub",
+            "Отменить отложенную публикацию",
+            "Не удалось отменить отложенную публикацию",
+        ),
+    }
 
     @property
     def active_bindings(self) -> dict[str, ActiveBinding]:
@@ -563,6 +580,8 @@ class MainScreen(Screen):
         self.fetching: set[str] = set()
         # вкладка и время первого F5: отправляет второе нажатие в ней же
         self.publish_armed: tuple[ChapterTab, float] | None = None
+        # вкладки, у которых сейчас меняется статус на сайте
+        self.changing_status: set[ChapterTab] = set()
         super().__init__()
 
     def compose(self) -> ComposeResult:
@@ -586,6 +605,16 @@ class MainScreen(Screen):
                 and isinstance(pane, ChapterTab)
                 and pane.publishable
                 and not pane.syncing
+                and pane not in self.changing_status
+            )
+        if action == "status":
+            return (
+                self.api is not None
+                and isinstance(pane, ChapterTab)
+                and pane.title_editable
+                and pane.site_status in self.STATUS_ACTIONS
+                and not pane.syncing
+                and pane not in self.changing_status
             )
         return True
 
@@ -773,7 +802,9 @@ class MainScreen(Screen):
                 self.report_synced(published.after)
                 v = published.rev
                 self.notify(
-                    "Отправлено" if v is None else f"Отправлено (правка номер {v.site_num})"
+                    "Отправлено"
+                    if v is None
+                    else f"Отправлено (правка номер {v.site_num})"
                 )
             elif published.first.kind != "merge" and error is None:
                 self.notify(
@@ -795,6 +826,51 @@ class MainScreen(Screen):
                 f"Ошибка разметки, строка {error.line + 1}: {error.message}",
                 severity="error",
             )
+
+    def action_status(self) -> None:
+        pane = self.query_one(TabbedContent).active_pane
+        if not isinstance(pane, ChapterTab) or pane.site_status is None:
+            return
+        action, label, _ = self.STATUS_ACTIONS[pane.site_status]
+
+        def chosen(result: str | None) -> None:
+            if result is not None:
+                self.change_status(pane)
+
+        confirm = {"show_part": "Нажмите ещё раз, чтобы опубликовать"}
+        self.app.push_screen(
+            MenuScreen("Статус главы", [(action, label)], confirm), chosen
+        )
+
+    # текст не отправляется, поэтому правки во вкладке не закрываются
+    @work(group="chapter_status")
+    async def change_status(self, tab: ChapterTab) -> None:
+        if self.api is None or tab.site_status not in self.STATUS_ACTIONS:
+            return
+        action, _, failed = self.STATUS_ACTIONS[tab.site_status]
+        status = tab.site_status
+        self.changing_status.add(tab)
+        self.refresh_bindings()
+        try:
+            await self.api.set_chapter_status(tab.chapter_id, action)
+            try:
+                chapter = await self.api.get_chapter(tab.fic_id, tab.chapter_id)
+            except FicbookAPIError as e:
+                report_api_error(
+                    self, e, "Статус изменён, но перечитать главу не удалось"
+                )
+            else:
+                status = chapter.status
+                if status is not None:
+                    self.notify(f"Статус главы: {STATUSES.get(status, status)}")
+        except FicbookAPIError as e:
+            report_api_error(self, e, failed)
+        finally:
+            self.changing_status.discard(tab)
+        if tab.is_attached:
+            tab.site_status = status
+            tab.post_message(tab.InfoChanged(tab))
+        self.refresh_bindings()
 
     def read_meta(self, fic_id: str, chapter_id: str, title: str) -> ChapterMeta | None:
         """None: chapter.json повреждён."""

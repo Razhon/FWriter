@@ -1,0 +1,23 @@
+MenuScreen {
+    align: center middle;
+}
+
+#menu {
+    height: auto;
+    width: auto;
+    min-width: 40;
+    max-width: 80;
+
+    padding: 0 1;
+    border: thick $background 80%;
+    background: $surface;
+}
+
+#menu_title {
+    margin: 1;
+}
+
+#menu OptionList {
+    height: auto;
+    margin-bottom: 1;
+}

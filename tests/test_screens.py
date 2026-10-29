@@ -31,13 +31,14 @@ from fwriter.screens import (
     SessionExpired,
 )
 from fwriter.screens.api_errors import report_api_error
-from fwriter.screens.chapter import ChapterTab
+from fwriter.screens.chapter import ChapterEditor, ChapterTab
 from fwriter.screens.main import (
     FIC_SECTIONS,
     ChapterButton,
     ClickableLabel,
     TrashButton,
 )
+from fwriter.screens.menu import MenuScreen
 from fwriter.secrets import SecretStorage
 
 
@@ -1560,6 +1561,55 @@ def test_footer_order_in_chapter(tmp_path):
             await open_chapter(pilot, main)
             shown = [b.key for _, b, *_ in main.active_bindings.values() if b.show]
             assert shown[:3] == ["f1", "f2", "f5"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("before", "action", "presses"), [(1, "show_part", 2), (2, "hide_part", 1)]
+)
+def test_f6_changes_status(tmp_path, monkeypatch, before, action, presses):
+    api = api_without_fics()
+    status = before
+    sent: list[tuple[str, str]] = []
+
+    async def synced(*args) -> Synced:
+        return Synced("same", "Текст.", status=status)
+
+    monkeypatch.setattr("fwriter.screens.main.sync_chapter", synced)
+
+    async def fake_get_chapter(fic_id: str, chapter_id: str) -> Chapter:
+        return Chapter("Глава", "Текст.", True, status=status, history_url="")
+
+    async def fake_set_status(chapter_id: str, act: str) -> None:
+        nonlocal status
+        sent.append((chapter_id, act))
+        status = 3 - status
+
+    api.get_chapter = fake_get_chapter
+    api.set_chapter_status = fake_set_status  # type: ignore[method-assign]
+    main = MainScreen(api, ChapterStorage(tmp_path))
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            # фокус в редакторе: у TextArea на f6 своя привязка
+            assert isinstance(main.focused, ChapterEditor)
+            await pilot.press("f6")
+            await pilot.pause()
+            assert isinstance(pilot.app.screen, MenuScreen)
+            # "Опубликовать" выбирают дважды, первое нажатие только спрашивает
+            for _ in range(presses - 1):
+                await pilot.press("enter")
+                await pilot.pause()
+                assert sent == []
+            await pilot.press("enter")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert sent == [("00000000", action)]
+            assert main.query_one(ChapterTab).site_status == 3 - before
+            assert main.check_action("status", ())
 
     asyncio.run(run())
 
