@@ -4,10 +4,20 @@ from fwriter.core.markup import (
     TAB_WIDTH,
     TAGS,
     MarkupError,
+    apply,
     check,
+    dashes,
+    ellipsis,
     layout,
+    para_style,
+    paras_touched,
+    quotes,
+    restyle,
+    spaces,
     to_raw,
     to_screen,
+    tweak_kind,
+    typography,
 )
 
 VALID = (
@@ -157,3 +167,246 @@ def test_layout_position_map(text: str):
                     .replace("\r", " ")
                     == r.text
                 )
+
+
+# оформление абзацев
+
+STYLES = {
+    "blank": "Раз.\n\nДва.\n\nТри.",
+    "indent": "<tab>Раз.\n<tab>Два.\n<tab>Три.",
+    "indent_blank": "<tab>Раз.\n\n<tab>Два.\n\n<tab>Три.",
+    "plain": "Раз.\nДва.\nТри.",
+}
+
+
+@pytest.mark.parametrize("style", STYLES)
+def test_para_style(style: str):
+    assert para_style(STYLES[style]) == style
+
+
+def test_para_style_mixed_and_empty():
+    assert para_style("<tab>Раз.\nДва.") == "mixed"
+    assert para_style("Раз.\n\nДва.\nТри.") == "mixed"
+    assert para_style("") == "plain"
+    assert para_style("<center>***</center>") == "plain"
+
+
+@pytest.mark.parametrize("source", STYLES)
+@pytest.mark.parametrize("target", ["blank", "indent", "indent_blank"])
+def test_restyle_between_all_styles(source: str, target):
+    text = apply(STYLES[source], restyle(STYLES[source], target))
+    assert text == STYLES[target]
+    assert restyle(text, target) == []
+
+
+def test_restyle_keeps_blocks_scene_breaks_and_text():
+    text = (
+        "<center>Глава</center>\nРаз.\nДва <b>жирно\nи дальше</b>.\n\n\nТри."
+        "<footnote>сноска\nв две строки</footnote>\n<right>Подпись</right>"
+    )
+    out = apply(text, restyle(text, "indent_blank"))
+    assert out == (
+        "<center>Глава</center>\n<tab>Раз.\n\n<tab>Два <b>жирно\n\n<tab>и дальше</b>."
+        "\n\n\n<tab>Три.<footnote>сноска\nв две строки</footnote>\n<right>Подпись</right>"
+    )
+    # кроме \n между абзацами и <tab>, ничего не менялось
+    assert out.replace("<tab>", "").replace("\n", "") == text.replace("\n", "")
+
+
+def test_restyle_after_center_no_extra_blank():
+    # у читателя после </center> уже пустая строка: абзац рядом с блоком не трогаем
+    text = "<center>***</center>\nРаз.\nДва."
+    assert apply(text, restyle(text, "blank")) == "<center>***</center>\nРаз.\n\nДва."
+
+
+def test_restyle_selection():
+    text = "Раз.\nДва.\nТри.\nЧетыре."
+    sel = (text.index("Два"), text.index("Три") + 1)
+    assert apply(text, restyle(text, "blank", sel)) == "Раз.\nДва.\n\nТри.\nЧетыре."
+
+
+def test_restyle_crlf():
+    text = "Раз.\r\nДва."
+    assert apply(text, restyle(text, "blank")) == "Раз.\r\n\r\nДва."
+
+
+def test_paras_touched_matches_restyle():
+    text = STYLES["plain"]
+    assert paras_touched(text, restyle(text, "indent_blank")) == 3
+    assert paras_touched(text, restyle(text, "blank")) == 2
+
+
+def test_restyle_selection_to_line_start():
+    # Shift+Down: выделение кончается в начале следующей строки, она не задета
+    text = "Раз.\nДва.\nТри."
+    sel = (0, text.index("Три"))
+    assert apply(text, restyle(text, "blank", sel)) == "Раз.\n\nДва.\nТри."
+    edits, _ = typography("- Раз.\n- Два.", (0, len("- Раз.\n")))
+    assert apply("- Раз.\n- Два.", edits) == "— Раз.\n- Два."
+
+
+def test_restyle_tab_inside_inline_tag():
+    text = "<b><tab>Раз.</b>\nДва."
+    assert para_style(text) == "mixed"
+    out = apply(text, restyle(text, "indent"))
+    assert out == "<b><tab>Раз.</b>\n<tab>Два."
+    assert apply(out, restyle(out, "blank")) == "<b>Раз.</b>\n\nДва."
+
+
+def test_paras_touched_trailing_blank_lines():
+    text = "Раз \n\n"
+    edits, _ = typography(text)
+    assert apply(text, edits) == "Раз"
+    assert paras_touched(text, edits) == 1
+
+
+# типографика
+
+
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        ("- Привет.", "— Привет."),
+        ("<tab><b>-- Привет.</b>", "<tab><b>— Привет.</b>"),
+        ("  – Привет.", "  — Привет."),
+        ("Кто-то - тут.", "Кто-то - тут."),
+        ("-Привет.", "-Привет."),
+        # разделитель сцены в блоке - не реплика
+        ("<center>- - -</center>", "<center>- - -</center>"),
+        ("<right>Раз\n- - -</right>\n- Да.", "<right>Раз\n- - -</right>\n— Да."),
+    ],
+)
+def test_dashes(text: str, want: str):
+    assert apply(text, dashes(text)) == want
+
+
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        ('Он сказал: "Привет".', "Он сказал: «Привет»."),
+        ('"Он сказал "привет" и ушёл"', "«Он сказал „привет“ и ушёл»"),
+        ('«Он сказал "привет"»', "«Он сказал „привет“»"),
+        ('("да"), —"нет"', "(«да»), —«нет»"),
+        ('Он сказал "" и ушёл, "да"', "Он сказал «» и ушёл, «да»"),
+        ('(""), ""', "(«»), «»"),
+        ('""Война и мир" - роман"', "«„Война и мир“ - роман»"),
+        ('"роман - "Война и мир""', "«роман - „Война и мир“»"),
+        ('<b>"</b>жирно"', "<b>«</b>жирно»"),
+        ('сноска<footnote>"текст"</footnote>', "сноска<footnote>«текст»</footnote>"),
+    ],
+)
+def test_quotes(text: str, want: str):
+    edits, skipped = quotes(text)
+    assert (apply(text, edits), skipped) == (want, [])
+
+
+def test_quotes_odd_line_skipped():
+    text = 'Раз "два".\nТри "четыре.\nПять "шесть".'
+    edits, skipped = quotes(text)
+    assert apply(text, edits) == 'Раз «два».\nТри "четыре.\nПять «шесть».'
+    assert skipped == [1]
+
+
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        ("Ну... да", "Ну… да"),
+        ("Что?.. Да!..", "Что?.. Да!.."),
+        ("Четыре....", "Четыре...."),
+        ("Через <b>..</b>.", "Через <b>..</b>."),
+    ],
+)
+def test_ellipsis(text: str, want: str):
+    assert apply(text, ellipsis(text)) == want
+
+
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        ("Раз  \t два", "Раз два"),
+        ("Раз\tдва", "Раз два"),
+        ("  Раз два  ", "Раз два"),
+        ("   ", ""),
+        ("Раз , два !", "Раз, два!"),
+        # пробелы по обе стороны тега убираются, тег остаётся
+        ("Да <b> </b>, нет", "Да<b></b>, нет"),
+        ("Раз\xa0\xa0два", "Раз\xa0\xa0два"),
+        ("\n \nРаз\n\nДва\n  \n", "Раз\n\nДва"),
+        ("Раз \r\nДва\r\n\r\n", "Раз\r\nДва"),
+    ],
+)
+def test_spaces(text: str, want: str):
+    assert apply(text, spaces(text)) == want
+
+
+def test_typography_selection_and_tags_kept():
+    text = '- Раз "два"...\n- Три "четыре"...\n- Пять...'
+    sel = (text.index("Три"), text.index("Три"))
+    edits, _ = typography(text, sel)
+    assert apply(text, edits) == '- Раз "два"...\n— Три «четыре»…\n- Пять...'
+
+
+GLAVA = (
+    '\n<center>Глава</center>\n<tab>- Ну  ... "да" , а "кто-то" - нет!..\n'
+    '\n<tab>Он: <b>"Привет"</b><footnote>"сноска" ...</footnote>\nНечётное "\n  \n'
+)
+
+
+@pytest.mark.parametrize(
+    "tweak",
+    [
+        dashes,
+        ellipsis,
+        spaces,
+        lambda t: quotes(t)[0],
+        lambda t: typography(t)[0],
+    ],
+)
+def test_tweaks_idempotent_and_counted(tweak):
+    edits = tweak(GLAVA)
+    once = apply(GLAVA, edits)
+    assert tweak(once) == []
+    changed = sum(
+        a != b for a, b in zip(GLAVA.split("\n"), once.split("\n"), strict=False)
+    )
+    assert paras_touched(GLAVA, edits) >= 1
+    assert check(once) is None
+    # строки сравнимы, пока чистка не убрала крайние пустые
+    if once.count("\n") == GLAVA.count("\n"):
+        assert paras_touched(GLAVA, edits) == changed
+
+
+def test_typography_all_at_once():
+    edits, skipped = typography(GLAVA)
+    assert apply(GLAVA, edits) == (
+        "<center>Глава</center>\n<tab>— Ну… «да», а «кто-то» - нет!..\n"
+        '\n<tab>Он: <b>«Привет»</b><footnote>«сноска»…</footnote>\nНечётное "'
+    )
+    assert skipped == [5]
+
+
+# пометка правок твиков в диффе
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "last", "kind"),
+    [
+        (["Раз."], ["", "Раз."], False, "оформление абзацев"),
+        (["Раз.", "Два."], ["<tab>Раз.", "", "<tab>Два."], False, "оформление абзацев"),
+        (['Ну... "да"'], ["Ну… «да»"], False, "типографика"),
+        (['Ну... "да"'], ['Ну… "да"'], False, "типографика"),
+        (
+            ["- Раз ...", "Два."],
+            ["<tab>— Раз…", "", "<tab>Два."],
+            False,
+            "оформление абзацев, типографика",
+        ),
+        (["Раз.  ", ""], ["Раз."], True, "типографика"),
+        (["Раз.  ", ""], ["Раз."], False, "оформление абзацев, типографика"),
+        (["Раз.", "  "], ["Раз."], False, "оформление абзацев"),
+        (["Раз слово."], ["Раз слова."], False, None),
+        (["Раз."], ["Раз."], False, None),
+    ],
+)
+def test_tweak_kind(old, new, last, kind):
+    assert tweak_kind(old, new, last) == kind
