@@ -20,6 +20,7 @@ DATA_DIR = Path(user_data_dir("fwriter", appauthor=False))
 
 
 type Source = Literal["manual", "site", "publish"]
+type Decision = Literal["mine", "site", "both", "manual"]
 
 
 @dataclass
@@ -38,13 +39,33 @@ class Version:
 
 
 @dataclass
+class MergeChoice:
+    """Решение по блоку слияния: part - индекс в результате merge3()."""
+
+    part: int
+    start: int  # Hunk.start: проверка, что под индексом тот же блок
+    choice: Decision
+    text: str | None = None  # только у "manual"
+
+
+@dataclass
+class LastMerge:
+    """Файлы версий последнего слияния и решения по его блокам."""
+
+    base: str
+    site: str
+    mine: str
+    choices: list[MergeChoice] = field(default_factory=list)
+
+
+@dataclass
 class ChapterMeta:
     """chapter.json: название черновика и история версий главы."""
 
     title: str
     base: str | None = None  # файл версии сайта, от которой ведётся черновик
     restored: str | None = None
-    last_merge: dict[str, str] | None = None  # {"base", "site", "mine"} -> файл
+    last_merge: LastMerge | None = None
     versions: list[Version] = field(default_factory=list)
 
 
@@ -123,6 +144,16 @@ def _opt(value: object, kind: type) -> bool:
     return value is None or isinstance(value, kind)
 
 
+def _merge_ok(merge: LastMerge) -> bool:
+    files = (merge.base, merge.site, merge.mine)
+    return all(isinstance(s, str) for s in files) and all(
+        all(type(n) is int for n in (c.part, c.start))
+        and c.choice in get_args(Decision.__value__)
+        and (isinstance(c.text, str) if c.choice == "manual" else c.text is None)
+        for c in merge.choices
+    )
+
+
 def _check_chapter(chapter: ChapterMeta) -> None:
     """ValueError, если в chapter.json поле не того типа: иначе упадёт уже UI."""
     merge = chapter.last_merge
@@ -139,11 +170,7 @@ def _check_chapter(chapter: ChapterMeta) -> None:
         isinstance(chapter.title, str)
         and _opt(chapter.base, str)
         and _opt(chapter.restored, str)
-        and (
-            merge is None
-            or isinstance(merge, dict)
-            and all(isinstance(s, str) for s in (*merge, *merge.values()))
-        )
+        and (merge is None or _merge_ok(merge))
     ):
         raise ValueError("поля главы")
 
@@ -243,8 +270,12 @@ class ChapterStorage:
         try:
             data = json.loads(_read(path))
             versions = [Version(**v) for v in data.pop("versions")]
+            merge = data.pop("last_merge", None)
+            if merge is not None:
+                choices = [MergeChoice(**c) for c in merge.pop("choices", [])]
+                merge = LastMerge(**merge, choices=choices)
             # лишний ключ - повреждение: иначе запись потеряла бы поля новой версии
-            chapter = ChapterMeta(**data, versions=versions)
+            chapter = ChapterMeta(**data, last_merge=merge, versions=versions)
             _check_chapter(chapter)
             return chapter
         except (ValueError, TypeError, KeyError, AttributeError) as e:

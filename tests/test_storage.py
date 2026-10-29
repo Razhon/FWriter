@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 
 from fwriter.core.api.models import Fic, SlimChapterInfo
-from fwriter.core.storage import ChapterMeta, ChapterStorage, lock_data_dir
+from fwriter.core.storage import (
+    ChapterMeta,
+    ChapterStorage,
+    LastMerge,
+    MergeChoice,
+    lock_data_dir,
+)
 
 
 def test_draft_roundtrip(tmp_path):
@@ -171,6 +177,19 @@ def test_new_chapters_survive_restart(tmp_path):
         '{"versions": [1]}',
         '{"title": 5, "versions": []}',
         '{"title": "x", "last_merge": [1], "versions": []}',
+        '{"title": "x", "last_merge": {"base": "a", "site": "b"}, "versions": []}',
+        *(
+            '{"title": "x", "versions": [], "last_merge": {"base": "a", "site": "b",'
+            f' "mine": "c", "choices": [{choice}]}}}}'
+            for choice in (
+                '{"part": 1, "start": 0, "choice": "foo"}',
+                '{"part": 1, "start": 0, "choice": "manual"}',
+                '{"part": 1, "start": 0, "choice": "site", "text": "x"}',
+                '{"part": "1", "start": 0, "choice": "site"}',
+                '{"part": true, "start": 0, "choice": "site"}',
+                '{"part": 1, "choice": "site"}',
+            )
+        ),
         '{"title": "x", "versions": [], "new_field": 1}',
         (
             '{"title": "x", "versions": [{"file": "a.txt", "title": "x",'
@@ -262,6 +281,32 @@ def test_version_omits_empty_fields(tmp_path):
         "manual",
         "site",
     ]
+
+
+def test_last_merge_roundtrip(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    path = tmp_path / "fics" / "1" / "2" / "chapter.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"title": "x", "versions": [], "last_merge": {"base": "a", "site": "b",'
+        ' "mine": "c", "choices": [{"part": 1, "start": 0, "choice": "site"},'
+        ' {"part": 3, "start": 5, "choice": "manual", "text": ""}]}}',
+        encoding="utf-8",
+    )
+    merge = LastMerge(
+        "a",
+        "b",
+        "c",
+        [MergeChoice(1, 0, "site"), MergeChoice(3, 5, "manual", "")],
+    )
+    assert storage.read_chapter("1", "2").last_merge == merge
+
+    # перезапись chapter.json сохраняет решения, пустой text у "manual" не теряется
+    storage.set_title("1", "2", "y")
+    assert storage.read_chapter("1", "2").last_merge == merge
+    site, manual = json.loads(path.read_text("utf-8"))["last_merge"]["choices"]
+    assert "text" not in site
+    assert manual["text"] == ""
 
 
 def test_set_title_keeps_versions(tmp_path):
