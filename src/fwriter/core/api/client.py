@@ -356,6 +356,9 @@ class FicbookAPI:
                     created=self._parse_list_date(str(date["title"])),
                 )
             )
+        # у главы всегда есть хотя бы изначальная версия
+        if not revisions:
+            raise APIChangedError("В истории правок нет строк")
         return revisions
 
     async def get_revision(self, url: str) -> Revision:

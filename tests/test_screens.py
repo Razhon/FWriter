@@ -17,7 +17,8 @@ from fwriter.core.api.errors import (
     UserNotLoggedInError,
 )
 from fwriter.core.api.models import Chapter, Fic, SlimChapterInfo, UserInfo
-from fwriter.core.storage import ChapterStorage
+from fwriter.core.storage import ChapterStorage, Version
+from fwriter.core.sync import Synced
 from fwriter.run import FWriterApp, setup_logging
 from fwriter.screens import (
     ConnectingScreen,
@@ -28,7 +29,12 @@ from fwriter.screens import (
 )
 from fwriter.screens.api_errors import report_api_error
 from fwriter.screens.chapter import ChapterTab
-from fwriter.screens.main import FIC_SECTIONS, ChapterButton, TrashButton
+from fwriter.screens.main import (
+    FIC_SECTIONS,
+    ChapterButton,
+    ClickableLabel,
+    TrashButton,
+)
 from fwriter.secrets import SecretStorage
 
 
@@ -41,6 +47,19 @@ def offline_api(tmp_path, monkeypatch):
         return False
 
     monkeypatch.setattr(FicbookAPI, "is_readonly", not_readonly)
+    monkeypatch.setattr("fwriter.screens.main.sync_chapter", fake_sync)
+    # тесты не ждут подсветку нажатия
+    monkeypatch.setattr(ClickableLabel, "PRESS_DELAY", 0.01)
+
+
+async def fake_sync(api, storage, fic_id, chapter_id, title, readonly) -> Synced:
+    """Синхронизация без истории: черновик с диска, иначе get_chapter()."""
+    text = storage.read_draft(fic_id, chapter_id)
+    if text is not None:
+        return Synced("same", text)
+    site = await api.get_chapter(fic_id, chapter_id)
+    storage.write_draft(fic_id, chapter_id, site.content)
+    return Synced("new", site.content)
 
 
 def test_titles_are_plain_text():
@@ -448,7 +467,7 @@ def broken_write_draft(*args) -> None:
 
 
 def test_chapter_tab_saves_draft(tmp_path, monkeypatch):
-    monkeypatch.setattr(ChapterTab, "AUTOSAVE_DELAY", 0.1)
+    monkeypatch.setattr(ChapterTab, "AUTOSAVE_DELAY", 0.01)
     api = api_without_fics()
     fetched: list[str] = []
 
@@ -477,12 +496,12 @@ def test_chapter_tab_saves_draft(tmp_path, monkeypatch):
                 # ChapterButton.Open должен дойти до MainScreen и запустить воркер
                 await pilot.pause()
                 await pilot.app.workers.wait_for_complete()
-                await pilot.pause(0.3)  # подсветка нажатия
+                await pilot.pause(0.05)  # подсветка нажатия
                 tab = main.query_one(ChapterTab)
                 assert tabbed.active == tab.id
                 tab.editor.move_cursor(tab.editor.document.end)
                 await pilot.press(*keys)
-                await pilot.pause(0.3)  # автосохранение
+                await pilot.pause(0.05)  # автосохранение
                 return tab
 
             await pilot.app.workers.wait_for_complete()
@@ -593,6 +612,79 @@ def test_click_while_loading_sends_one_request(tmp_path):
             await open_chapter(pilot, main)
             assert main.query_one(ChapterTab).editor.text == "!Текст."
         assert fetched == ["00000000"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("result", "note"),
+    [
+        (
+            Synced(
+                "ff",
+                "Новое.",
+                Version(
+                    "v.txt",
+                    "Г",
+                    "site",
+                    "2026-10-27T10:00:00",
+                    site_num=2,
+                    author_name="user-1",
+                ),
+            ),
+            "Обновлено до правки №2 (user-1, 2026-10-27T10:00:00)",
+        ),
+        (Synced("merge", "Текст."), "На сайте новая правка, слияние пока недоступно"),
+        (
+            NetworkError("Нет связи с сайтом"),
+            "Не удалось обновить главу\nНет связи с сайтом",
+        ),
+    ],
+)
+def test_open_chapter_syncs(tmp_path, monkeypatch, result, note: str):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft("00000000", "00000000", "Текст.")
+    main = MainScreen(api_without_fics(), storage)
+
+    async def synced(*args) -> Synced:
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr("fwriter.screens.main.sync_chapter", synced)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            # при ошибке сайта открывается локальный черновик
+            expected = "Текст." if isinstance(result, Exception) else result.text
+            assert main.query_one(ChapterTab).editor.text == expected
+            assert note in [n.message for n in pilot.app._notifications]
+
+    asyncio.run(run())
+
+
+def test_chapter_off_site_is_not_synced(tmp_path, monkeypatch):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft("00000000", "00000000", "Текст.")
+    main = MainScreen(api_without_fics(), storage)
+    calls: list[str] = []
+
+    async def synced(*args) -> Synced:
+        calls.append("sync")
+        return Synced("same", "Текст.")
+
+    monkeypatch.setattr("fwriter.screens.main.sync_chapter", synced)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            main.open_chapter(FIC, FIC.chapters[0], "author", on_site=False)
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert main.query(ChapterTab)
+        assert not calls
 
     asyncio.run(run())
 
@@ -1010,7 +1102,7 @@ def test_saved_login_without_network_goes_offline(tmp_path, monkeypatch):
             tab.editor.move_cursor(tab.editor.document.end)
             await pilot.press("!")
             offline.action_start_page()
-            await pilot.pause(0.3)  # подсветка нажатия
+            await pilot.pause(0.05)  # подсветка нажатия
             await pilot.click(".relogin_btn")
             await pilot.pause()
             await pilot.app.workers.wait_for_complete()
@@ -1152,7 +1244,7 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
 
     Последняя глава работы из "Нет на сайте" уносит в корзину всю работу.
     """
-    monkeypatch.setattr(TrashButton, "CONFIRM_DELAY", 0.5)
+    monkeypatch.setattr(TrashButton, "CONFIRM_DELAY", 0.3)
     api = api_without_fics()
     storage = ChapterStorage(tmp_path)
     storage.write_fic(FIC, "author")
@@ -1170,10 +1262,10 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
 
     async def press_twice(pilot, btn: ChapterButton) -> None:
         btn.focus()
-        # подсветка нажатия глушит повтор раньше 0.2 с
-        await pilot.pause(0.3)
+        # подсветка нажатия глушит повтор раньше PRESS_DELAY
+        await pilot.pause(0.05)
         await pilot.press("x")
-        await pilot.pause(0.3)
+        await pilot.pause(0.05)
         await pilot.press("x")
         await pilot.pause()
 
@@ -1193,7 +1285,7 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
             await pilot.press("x")
             await pilot.pause()
             assert str(new.trash.render()) == "Удалить? X"
-            await pilot.pause(1.0)
+            await pilot.pause(0.4)
             assert str(new.trash.render()) == "X"
             assert storage.new_chapters(FIC.id)
 
@@ -1223,7 +1315,7 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
             await pilot.app.workers.wait_for_complete()
             await pilot.press("f1")
             fic_trash.action_press()
-            await pilot.pause(0.3)
+            await pilot.pause(0.05)
             # глав столько, сколько осталось, а не сколько было при построении
             assert (
                 str(fic_trash.render())
@@ -1238,7 +1330,7 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
             # мышью по крестику; последняя глава - вся работа
             trash = gone2.trash
             trash.action_press()
-            await pilot.pause(0.3)
+            await pilot.pause(0.05)
             trash.action_press()
             await pilot.pause()
             assert [fic.id for fic, _ in storage.read_fics()[0]] == [FIC.id]

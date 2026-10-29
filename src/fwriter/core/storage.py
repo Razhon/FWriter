@@ -65,6 +65,7 @@ class ChapterMeta:
     title: str
     base: str | None = None  # файл версии сайта, от которой ведётся черновик
     restored: str | None = None
+    history_url: str | None = None  # mine или participated, как дал сайт
     last_merge: LastMerge | None = None
     versions: list[Version] = field(default_factory=list)
 
@@ -170,6 +171,7 @@ def _check_chapter(chapter: ChapterMeta) -> None:
         isinstance(chapter.title, str)
         and _opt(chapter.base, str)
         and _opt(chapter.restored, str)
+        and _opt(chapter.history_url, str)
         and (merge is None or _merge_ok(merge))
     ):
         raise ValueError("поля главы")
@@ -281,16 +283,14 @@ class ChapterStorage:
         except (ValueError, TypeError, KeyError, AttributeError) as e:
             raise ValueError(f"Файл {path} повреждён") from e
 
-    def _load_chapter(self, fic_id: str, chapter_id: str, title: str) -> ChapterMeta:
+    def load_chapter(self, fic_id: str, chapter_id: str, title: str) -> ChapterMeta:
         """Нет chapter.json - пустая история; повреждённый - ValueError, не затираем."""
         try:
             return self.read_chapter(fic_id, chapter_id)
         except FileNotFoundError:
             return ChapterMeta(title)
 
-    def _write_chapter(
-        self, fic_id: str, chapter_id: str, chapter: ChapterMeta
-    ) -> None:
+    def write_chapter(self, fic_id: str, chapter_id: str, chapter: ChapterMeta) -> None:
         # нет поля и null читаются одинаково - как значение по умолчанию
         data = asdict(
             chapter, dict_factory=lambda kv: {k: v for k, v in kv if v is not None}
@@ -298,8 +298,8 @@ class ChapterStorage:
         _write(self._chapter(fic_id, chapter_id) / "chapter.json", _dump(data))
 
     def set_title(self, fic_id: str, chapter_id: str, title: str) -> None:
-        chapter = self._load_chapter(fic_id, chapter_id, title)
-        self._write_chapter(fic_id, chapter_id, replace(chapter, title=title))
+        chapter = self.load_chapter(fic_id, chapter_id, title)
+        self.write_chapter(fic_id, chapter_id, replace(chapter, title=title))
 
     def read_version(self, fic_id: str, chapter_id: str, file: str) -> str:
         return _read(self._chapter(fic_id, chapter_id) / "versions" / file)
@@ -324,7 +324,7 @@ class ChapterStorage:
         created по умолчанию - текущее время; у ревизий сайта - дата с сайта.
         """
         # до снимка: при повреждённом chapter.json не будет лишнего файла
-        chapter = self._load_chapter(fic_id, chapter_id, title)
+        chapter = self.load_chapter(fic_id, chapter_id, title)
         now = datetime.now()  # noqa: DTZ005 локальное время без пояса, как даты на сайте
         versions = self._chapter(fic_id, chapter_id) / "versions"
         versions.mkdir(parents=True, exist_ok=True)
@@ -353,7 +353,7 @@ class ChapterStorage:
             author_name=author_name,
         )
         chapter.versions.append(version)
-        self._write_chapter(fic_id, chapter_id, chapter)
+        self.write_chapter(fic_id, chapter_id, chapter)
         return version
 
     def new_chapter_id(self, fic_id: str) -> str:

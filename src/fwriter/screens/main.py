@@ -27,6 +27,7 @@ from ..core.api.errors import FicbookAPIError, NetworkError, UserNotLoggedInErro
 from ..core.api.models import Fic, Role, SlimChapterInfo, can_manage
 from ..core.catalog import plan_fic
 from ..core.storage import DATA_DIR, ChapterMeta, ChapterStorage
+from ..core.sync import sync_chapter
 from .api_errors import report_api_error
 from .chapter import ChapterTab
 
@@ -45,6 +46,8 @@ STOP_LOADING = (UserNotLoggedInError, NetworkError)
 
 class ClickableLabel(Label, can_focus=True):
     """Намеренный отдельный класс от Button, так легче"""
+
+    PRESS_DELAY = 0.2
 
     DEFAULT_CSS = """
     ClickableLabel {
@@ -86,7 +89,7 @@ class ClickableLabel(Label, can_focus=True):
         if self.disabled or not self.display or self.has_class("-active"):
             return
         self.add_class("-active")
-        self.set_timer(0.2, partial(self.remove_class, "-active"))
+        self.set_timer(self.PRESS_DELAY, partial(self.remove_class, "-active"))
         self.press()
 
     def press(self) -> None:
@@ -155,10 +158,13 @@ class ChapterButton(ClickableLabel):
     class Open(Message):
         """Нажата глава; открывает MainScreen."""
 
-        def __init__(self, fic: Fic, chapter: SlimChapterInfo, role: Role) -> None:
+        def __init__(
+            self, fic: Fic, chapter: SlimChapterInfo, role: Role, on_site: bool
+        ) -> None:
             self.fic = fic
             self.chapter = chapter
             self.role = role
+            self.on_site = on_site
             super().__init__()
 
     def __init__(
@@ -177,7 +183,11 @@ class ChapterButton(ClickableLabel):
         super().__init__(chapter.title + mark, classes="chapter_btn")
 
     def press(self) -> None:
-        self.post_message(ChapterButton.Open(self.fic, self.chapter, self.role))
+        # крестик только у глав, которых нет на сайте
+        on_site = self.trash is None
+        self.post_message(
+            ChapterButton.Open(self.fic, self.chapter, self.role, on_site)
+        )
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
         # False прячет подсказку в footer у глав с сайта
@@ -550,15 +560,15 @@ class MainScreen(Screen):
         tabbed.query_one(Tabs).focus()
 
     def on_chapter_button_open(self, message: ChapterButton.Open) -> None:
-        self.open_chapter(message.fic, message.chapter, message.role)
+        self.open_chapter(message.fic, message.chapter, message.role, message.on_site)
 
     # на экране, а не на вкладке: воркер живёт, пока открыты вкладки глав
     # не exclusive: клик по другой главе не должен отменять открытие первой
     @work(group="open_chapter")
     async def open_chapter(
-        self, fic: Fic, chapter: SlimChapterInfo, role: Role
+        self, fic: Fic, chapter: SlimChapterInfo, role: Role, on_site: bool = True
     ) -> None:
-        """Вкладка с локальным черновиком; если его нет - с текстом с сайта."""
+        """Вкладка с черновиком; on_site - сначала догнать его до сайта."""
         tabbed = self.query_one(TabbedContent)
         tab_id = ChapterTab.tab_id(fic.id, chapter.id)
 
@@ -580,31 +590,50 @@ class MainScreen(Screen):
             self.notify("Не удалось прочитать черновик главы с диска", severity="error")
             return
         title = chapter.title
+        if self.api is not None and on_site:
+            action = (
+                "Не удалось скачать главу"
+                if text is None
+                else "Не удалось обновить главу"
+            )
+            # от проверки fetching до add синхронно, так что пока идёт запрос,
+            # эту главу никто не откроет и черновик для неё не появится
+            self.fetching.add(tab_id)
+            try:
+                synced = await sync_chapter(
+                    self.api, self.storage, fic.id, chapter.id, title, fic.readonly
+                )
+            except FicbookAPIError as e:
+                report_api_error(self, e, action)
+            except OSError, ValueError:
+                log.warning(
+                    "глава %s/%s не обновлена", fic.id, chapter.id, exc_info=True
+                )
+                self.notify(
+                    f"{action}\nОшибка чтения или записи на диске", severity="error"
+                )
+            else:
+                text = synced.text
+                if synced.kind == "ff" and synced.site is not None:
+                    v = synced.site
+                    self.notify(
+                        f"Обновлено до правки №{v.site_num} ({v.author_name}, {v.created})"
+                    )
+                elif synced.kind == "merge":
+                    # shortcut: слияния нет до MergeScreen, черновик открывается как есть
+                    self.notify(
+                        "На сайте новая правка, слияние пока недоступно",
+                        severity="warning",
+                    )
+            finally:
+                self.fetching.discard(tab_id)
         if text is None:
             if self.api is None:
                 self.notify(
                     "Не удалось скачать главу\nОфлайн, а локальной копии главы нет",
                     severity="warning",
                 )
-                return
-            # от проверки fetching до add синхронно, так что пока идёт запрос,
-            # эту главу никто не откроет и черновик для неё не появится
-            self.fetching.add(tab_id)
-            try:
-                site = await self.api.get_chapter(fic.id, chapter.id)
-            except FicbookAPIError as e:
-                report_api_error(self, e, "Не удалось скачать главу")
-                return
-            finally:
-                self.fetching.discard(tab_id)
-            text, title = site.content, site.title
-            try:
-                self.storage.write_draft(fic.id, chapter.id, text)
-            except OSError:
-                log.warning(
-                    "черновик %s/%s не записан", fic.id, chapter.id, exc_info=True
-                )
-                self.notify("Не удалось записать черновик на диск", severity="error")
+            return
 
         try:
             meta = self.storage.read_chapter(fic.id, chapter.id)

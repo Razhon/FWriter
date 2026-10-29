@@ -26,6 +26,11 @@ build-backend = "uv_build"
 dev = [
     "pyright>=1.1.414",
     "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.16.2",
     "textual-dev>=1.8.0",
 ]
+
+[tool.pytest.ini_options]
+# 8 процессов быстрее auto: на 28 ядрах запуск воркеров съедает выигрыш
+addopts = "-n 8"

@@ -552,6 +552,13 @@ def test_get_chapter_revisions_date_from_title():
     assert revisions[0].created == "2026-10-26T02:05"
 
 
+def test_get_chapter_revisions_empty_raises():
+    url = "/home/versions/mine/1001/parts/2001/history"
+    html = "<main><table><tbody></tbody></table></main>"
+    with pytest.raises(APIChangedError, match="нет строк"):
+        fetch(html, lambda api: api.get_chapter_revisions(url), url)
+
+
 @pytest.mark.parametrize(
     ("text", "iso"),
     [
