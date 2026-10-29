@@ -210,7 +210,8 @@ class FicCollapsible(Collapsible):
             *children,
             # типизирует title как str, но принимает Content; str разбирается как разметка
             title=Content(fic.title),  # pyright: ignore[reportArgumentType]
-            classes=classes,
+            # сам Collapsible свернётся только в on_mount, а кадр до него мигнёт прокруткой
+            classes=f"{classes} -collapsed",
         )
 
     def chapter_count(self) -> int:
@@ -285,15 +286,19 @@ class StartPageTab(TabPane):
 
     def compose(self) -> ComposeResult:
         if self.api:
-            yield Center(Label("Привет, гость!", id="greeting"))
+            # равные колонки по бокам держат приветствие в центре, пока видна подпись
+            yield Horizontal(
+                Label("Загружаем список работ…", id="loading", classes="side"),
+                Label("Привет, гость!", id="greeting"),
+                Label(classes="side"),
+                id="greeting_row",
+            )
         else:
             yield Center(
                 Label("Офлайн: список работ с последнего входа", id="greeting")
             )
             yield Center(ClickableLabel("Повторить вход", classes="relogin_btn"))
         yield Rule()
-        if self.api:
-            yield Label("Загружаем список работ…", id="loading")
         yield VerticalScroll(classes="fics_container")
 
     def on_mount(self) -> None:
@@ -310,7 +315,8 @@ class StartPageTab(TabPane):
             await self.load_online(self.api)
         finally:
             # и при ошибке, и при отмене воркера
-            self.query("#loading").remove()
+            # не remove: без колонки приветствие уедет влево
+            self.query("#loading").set(visible=False)
 
     async def load_online(self, api: FicbookAPI) -> None:
         try:
@@ -558,6 +564,10 @@ class MainScreen(Screen):
         return True
 
     def on_tabbed_content_tab_activated(self) -> None:
+        # в главе ctrl+p не нужен; footer перерисуется от refresh_bindings
+        self.query_one(Footer).show_command_palette = (
+            self.query_one(TabbedContent).active == "start_page"
+        )
         self.refresh_bindings()
         self.show_info()
 

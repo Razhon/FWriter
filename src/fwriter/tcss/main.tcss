@@ -14,6 +14,15 @@ Label {
     margin: 1 0 0 0;
 }
 
+#greeting_row {
+    height: auto;
+
+    .side {
+        width: 1fr;
+        margin: 1 0 0 1;
+    }
+}
+
 .fics_container {
     content-align: center middle;
     padding: 0 12;

@@ -130,7 +130,7 @@ def test_failed_fic_list_keeps_others():
             await pilot.pause()
             titles = [str(c.title) for c in main.query(Collapsible)]
             assert titles == ["author", "gamma"]
-            assert not main.query("#loading")
+            assert not main.query_one("#loading").visible
             # обе ошибки - в одном окне
             errors = [s for s in pilot.app.screen_stack if isinstance(s, ErrorScreen)]
             assert len(errors) == 1

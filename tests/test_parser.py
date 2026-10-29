@@ -554,7 +554,7 @@ def test_get_chapter_revisions_date_from_title():
 
 def test_get_chapter_revisions_empty_raises():
     url = "/home/versions/mine/1001/parts/2001/history"
-    html = "<main><table><tbody></tbody></table></main>"
+    html = PROFILE + "<main><table><tbody></tbody></table></main>"
     with pytest.raises(APIChangedError, match="нет строк"):
         fetch(html, lambda api: api.get_chapter_revisions(url), url)
 
