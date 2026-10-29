@@ -17,6 +17,7 @@ class Synced:
     kind: SyncKind
     text: str  # черновик после синхронизации
     site: Version | None = None  # новая ревизия сайта у ff и merge
+    status: int | None = None  # param главы на сайте; None у readonly и не у автора
 
 
 def _same(
@@ -53,15 +54,18 @@ async def sync_chapter(
     FicbookAPIError - от сайта; OSError и ValueError - от диска.
     """
     meta = storage.load_chapter(fic_id, chapter_id, title)
-    if meta.history_url is None:
-        if readonly:
-            # страницы главы нет (403), название - из fic.json
-            meta.history_url = api.participated_history_url(fic_id, chapter_id)
-        else:
-            chapter = await api.get_chapter(fic_id, chapter_id)
+    status = None
+    if not readonly:
+        # каждый раз: статус меняют и на сайте
+        chapter = await api.get_chapter(fic_id, chapter_id)
+        status = chapter.status
+        if meta.history_url is None:
             meta.history_url = chapter.history_url
             if not meta.versions:
                 meta.title = chapter.title
+    elif meta.history_url is None:
+        # страницы главы нет (403), название - из fic.json
+        meta.history_url = api.participated_history_url(fic_id, chapter_id)
     revs = await api.get_chapter_revisions(meta.history_url)
     last = await api.get_revision(revs[0].url)
 
@@ -81,7 +85,7 @@ async def sync_chapter(
     base = next((v for v in meta.versions if v.file == meta.base), None)
     if known is not None and base is not None and base.file == known.file:
         draft = storage.read_draft(fic_id, chapter_id)
-        return Synced("same", last.content if draft is None else draft)
+        return Synced("same", last.content if draft is None else draft, status=status)
 
     site = known or storage.add_version(
         fic_id,
@@ -106,9 +110,9 @@ async def sync_chapter(
     ):
         kind = "ff"  # черновик равен base, а она уже в versions/
     else:
-        return Synced("merge", draft, site)
+        return Synced("merge", draft, site, status)
     if kind != "same":
         storage.write_draft(fic_id, chapter_id, last.content)
     meta = storage.load_chapter(fic_id, chapter_id, title)
     storage.write_chapter(fic_id, chapter_id, replace(meta, base=site.file))
-    return Synced(kind, last.content, site if kind == "ff" else None)
+    return Synced(kind, last.content, site if kind == "ff" else None, status)

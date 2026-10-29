@@ -1,20 +1,46 @@
 import logging
+from typing import ClassVar
 
 from textual import on
 from textual.app import ComposeResult
+from textual.binding import Binding, BindingType
 from textual.content import Content
+from textual.message import Message
 from textual.timer import Timer
-from textual.widgets import Input, TabbedContent, TabPane, TextArea
+from textual.widgets import Input, Label, TabbedContent, TabPane, TextArea
 
+from ..core.markup import count
 from ..core.storage import ChapterMeta, ChapterStorage
 
 log = logging.getLogger(__name__)
 
+# param главы на сайте
+STATUSES = {1: "черновик", 2: "опубликована", 3: "отложена"}
+
+
+class ChapterEditor(TextArea):
+    def on_resize(self) -> None:
+        # TextArea переносит строки по Resize без refresh(): строки, нарисованные
+        # до этого, остаются со старым переносом до первого сдвига курсора
+        self.refresh()
+
 
 class ChapterTab(TabPane):
-    """Название и текст главы; draft.txt пишется через 2 с после ввода и при закрытии."""
+    """Текст главы; название правится по F2. draft.txt пишется через 2 с после ввода и при закрытии."""
 
     AUTOSAVE_DELAY = 2.0
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("f2", "rename", "Переименовать"),
+        Binding("escape", "hide_title", show=False),
+    ]
+
+    class InfoChanged(Message):
+        """Поменялась строка о главе для footer."""
+
+        def __init__(self, tab: ChapterTab) -> None:
+            self.tab = tab
+            super().__init__()
 
     def __init__(
         self,
@@ -26,21 +52,90 @@ class ChapterTab(TabPane):
         title: str,
         title_editable: bool,
         readonly: bool = False,
+        syncing: bool = False,
     ) -> None:
-        """meta None: chapter.json повреждён, название не сохраняется, чтобы не затереть его."""
+        """meta None: chapter.json повреждён, название не сохраняется, чтобы не затереть его.
+
+        syncing: идёт синхронизация, правки закрыты до synced().
+        """
         self.storage = storage
         self.fic_id = fic_id
         self.chapter_id = chapter_id
-        self.saved_title = meta.title if meta else None
+        self.title_editable = title_editable
+        self.readonly = readonly
+        self.syncing = syncing
+        self.site_status: int | None = None
         self.save_timer: Timer | None = None
         # ссылки, а не query_one: в on_unmount дочерние виджеты уже сняты
-        self.title_input = Input(title, disabled=not title_editable)
-        self.editor = TextArea(text, read_only=readonly)
+        self.title_input = Input(title)
+        self.title_input.display = False
+        self.title_before = title
+        self.editor = ChapterEditor()
+        self.status = Label("Проверяем сайт…")
+        self.status.display = syncing
+        self.set_text(text, meta)
+        super().__init__(Content(title), id=self.tab_id(fic_id, chapter_id))
+
+    def set_text(self, text: str, meta: ChapterMeta | None) -> None:
+        self.saved_title = None if self.syncing or meta is None else meta.title
+        if meta:
+            self.title_input.value = meta.title
+        self.title_input.disabled = self.syncing or not self.title_editable
+        self.editor.read_only = self.syncing or self.readonly
+        self.editor.load_text(text)
         # TextArea приводит переводы строк к одному виду (и \u2028, \x0c - к \n):
         # без правок такой текст не перезаписываем, при правке предупреждаем
         self.saved_text = self.editor.text
+        self.disk_text = text
         self.newlines_changed = self.saved_text != text
-        super().__init__(Content(title), id=self.tab_id(fic_id, chapter_id))
+        self.base_text = self.read_base(meta)
+
+    def read_base(self, meta: ChapterMeta | None) -> str | None:
+        """Текст сайта, от которого ведётся черновик; None - не с чем сравнить."""
+        if self.syncing or meta is None or meta.base is None:
+            return None
+        try:
+            return self.storage.read_version(self.fic_id, self.chapter_id, meta.base)
+        except OSError, ValueError:
+            log.warning(
+                "base %s/%s не прочитана", self.fic_id, self.chapter_id, exc_info=True
+            )
+            return None
+
+    def synced(
+        self, text: str, meta: ChapterMeta | None, status: int | None = None
+    ) -> None:
+        """Синхронизация кончилась: текст после неё, правки открыты."""
+        self.syncing = False
+        self.site_status = status
+        self.status.display = False
+        self.set_text(text, meta)
+        self.refresh_bindings()
+        self.post_message(self.InfoChanged(self))
+        self.warn_newlines()
+
+    def info(self) -> str:
+        """Статус на сайте, состояние черновика, символы и слова."""
+        parts = []
+        if self.site_status is not None:
+            parts.append(STATUSES.get(self.site_status, f"статус {self.site_status}"))
+        text = self.editor.text
+        if not self.syncing:
+            title_changed = (
+                self.saved_title is not None
+                and self.title_input.value != self.saved_title
+            )
+            unsaved = text != self.saved_text or title_changed
+            parts.append("не сохранено" if unsaved else "сохранено")
+            if self.base_text is not None:
+                # без правок на диске лежит disk_text, а не текст после TextArea
+                draft = self.disk_text if text == self.saved_text else text
+                parts.append(
+                    "как на сайте" if draft == self.base_text else "есть правки"
+                )
+        chars, words = count(text)
+        parts.append(f"{chars} зн., {words} сл.")
+        return " · ".join(parts)
 
     @staticmethod
     def tab_id(fic_id: str, chapter_id: str) -> str:
@@ -48,9 +143,14 @@ class ChapterTab(TabPane):
 
     def compose(self) -> ComposeResult:
         yield self.title_input
+        yield self.status
         yield self.editor
 
     def on_mount(self) -> None:
+        if not self.syncing:
+            self.warn_newlines()
+
+    def warn_newlines(self) -> None:
         if self.newlines_changed:
             self.notify(
                 "В тексте главы разные переводы строк: "
@@ -58,12 +158,39 @@ class ChapterTab(TabPane):
                 severity="warning",
             )
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
+        if action == "rename":
+            return self.title_editable and not self.syncing
+        if action == "hide_title":
+            return self.title_input.display
+        return True
+
+    def action_rename(self) -> None:
+        self.title_before = self.title_input.value
+        self.title_input.display = True
+        self.title_input.focus()
+
+    def action_hide_title(self) -> None:
+        self.editor.focus()
+
+    @on(Input.Submitted)
+    def title_submitted(self) -> None:
+        self.editor.focus()
+
+    @on(Input.Blurred)
+    def hide_title(self) -> None:
+        # без названия вкладка осталась бы без подписи
+        if self.title_input.value == "":
+            self.title_input.value = self.title_before
+        self.title_input.display = False
+
     @on(Input.Changed)
     @on(TextArea.Changed)
     def schedule_save(self) -> None:
         if self.save_timer:
             self.save_timer.stop()
         self.save_timer = self.set_timer(self.AUTOSAVE_DELAY, self.save)
+        self.post_message(self.InfoChanged(self))
 
     @on(Input.Changed)
     def rename_tab(self, event: Input.Changed) -> None:
@@ -75,7 +202,7 @@ class ChapterTab(TabPane):
         try:
             if text != self.saved_text:
                 self.storage.write_draft(self.fic_id, self.chapter_id, text)
-                self.saved_text = text
+                self.saved_text = self.disk_text = text
             if self.saved_title is not None and title != self.saved_title:
                 self.storage.set_title(self.fic_id, self.chapter_id, title)
                 self.saved_title = title
@@ -90,6 +217,9 @@ class ChapterTab(TabPane):
                     severity="error",
                 )
             return False
+        finally:
+            if self.is_attached:
+                self.post_message(self.InfoChanged(self))
         return True
 
     # закрытие вкладки, выход и истёкшая сессия снимают вкладку

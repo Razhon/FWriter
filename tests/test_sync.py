@@ -58,10 +58,11 @@ def test_first_open_downloads_and_sets_base(tmp_path):
     assert meta.base == v.file
     assert (v.source, v.author, v.site_num, v.site_rev) == ("site", "3001", 1, None)
 
-    # второй раз: адрес истории с диска, новых версий нет
+    # второй раз: адрес истории с диска, новых версий нет, статус - снова с сайта
     api.calls.clear()
-    assert sync(api, storage).kind == "same"
-    assert "chapter" not in api.calls
+    again = sync(api, storage)
+    assert (again.kind, again.status) == ("same", 1)
+    assert api.calls[1] == MINE
     assert len(storage.read_chapter(FIC, CH).versions) == 1
 
 

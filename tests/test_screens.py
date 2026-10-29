@@ -1,8 +1,10 @@
 import asyncio
 import logging
+from dataclasses import replace
 
 import pytest
 from textual.app import App
+from textual.geometry import Region
 from textual.widgets import Collapsible, Input, Label, Log, TabbedContent
 from textual.widgets._collapsible import CollapsibleTitle
 
@@ -595,16 +597,25 @@ def test_click_while_loading_sends_one_request(tmp_path):
             await pilot.app.workers.wait_for_complete()
             main.open_chapter(FIC, FIC.chapters[0], "author")
             await pilot.pause()
+            # вкладка открыта сразу, но до конца синхронизации править нельзя
+            [tab] = main.query(ChapterTab)
+            assert tab.editor.read_only
+            # фокус в тексте, иначе TabbedContent вернётся к стартовой вкладке
+            assert main.query_one(TabbedContent).active == tab.id
+            assert main.focused is tab.editor
+            assert tab.title_input.disabled and tab.status.display
+            # повторное нажатие переключает на ту же вкладку
             main.open_chapter(FIC, FIC.chapters[0], "author")
             await pilot.pause()
-            messages = [n.message for n in pilot.app._notifications]
-            assert "Глава загружается…" in messages
+            assert len(main.query(ChapterTab)) == 1
 
             response.set()
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
             assert len(main.query(ChapterTab)) == 1
             assert not main.fetching
+            assert not tab.editor.read_only and main.focused is tab.editor
+            assert not tab.title_input.disabled and not tab.status.display
 
             # после закрытия глава открывается с диска, без второго запроса
             await pilot.press("!", "ctrl+w")
@@ -685,6 +696,86 @@ def test_chapter_off_site_is_not_synced(tmp_path, monkeypatch):
             await pilot.pause()
             assert main.query(ChapterTab)
         assert not calls
+
+    asyncio.run(run())
+
+
+def test_editor_rewraps_on_screen_after_sync(tmp_path, monkeypatch):
+    # без строки "Проверяем сайт…" редактор шире: старый перенос не должен остаться на экране
+    # короткие слова: на 2 клетки шире - другой перенос почти в каждой строке
+    text = "\n\n".join(" ".join(["ой"] * 150) for _ in range(8))
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft("00000000", "00000000", text)
+    main = MainScreen(api_without_fics(), storage)
+    response = asyncio.Event()
+
+    async def synced(*args) -> Synced:
+        await response.wait()
+        return Synced("same", text)
+
+    monkeypatch.setattr("fwriter.screens.main.sync_chapter", synced)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            main.open_chapter(FIC, FIC.chapters[0], "author")
+            # узкий редактор успевает нарисоваться
+            await pilot.pause(0.1)
+            response.set()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause(0.1)
+            editor = main.query_one(ChapterTab).editor
+
+            def shown() -> list[str]:
+                return [s.text for s in editor.render_lines(Region(0, 0, *editor.size))]
+
+            before = shown()
+            editor.refresh()
+            assert shown() == before
+
+    asyncio.run(run())
+
+
+def test_chapter_info_and_rename(tmp_path, monkeypatch):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft("00000000", "00000000", "Текст  главы.")
+    v = storage.add_version("00000000", "00000000", "Текст  главы.", "Глава", "site")
+    meta = storage.read_chapter("00000000", "00000000")
+    storage.write_chapter("00000000", "00000000", replace(meta, base=v.file))
+    main = MainScreen(api_without_fics(), storage)
+
+    async def synced(*args) -> Synced:
+        return Synced("same", "Текст  главы.", status=2)
+
+    monkeypatch.setattr("fwriter.screens.main.sync_chapter", synced)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            tab = main.query_one(ChapterTab)
+            info = main.query_one("#chapter_info", Label)
+            assert not tab.title_input.display
+            assert str(info.render()) == (
+                "опубликована · сохранено · как на сайте · 12 зн., 2 сл."
+            )
+
+            await pilot.press("!")
+            assert str(info.render()).startswith("опубликована · не сохранено · есть")
+
+            # F2 открывает название, Enter прячет его и возвращает в текст
+            await pilot.press("f2")
+            assert main.focused is tab.title_input
+            await pilot.press("end", "?", "enter")
+            assert not tab.title_input.display and main.focused is tab.editor
+            assert str(main.query_one(TabbedContent).get_tab(tab).label) == "Глава?"
+
+            # пустое название не остаётся
+            await pilot.press("f2", "ctrl+u", "escape")
+            assert tab.title_input.value == "Глава?"
+
+            await pilot.press("f1")
+            assert str(info.render()) == ""
 
     asyncio.run(run())
 

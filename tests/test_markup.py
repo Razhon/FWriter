@@ -6,6 +6,7 @@ from fwriter.core.markup import (
     MarkupError,
     apply,
     check,
+    count,
     dashes,
     ellipsis,
     layout,
@@ -123,6 +124,20 @@ def test_layout_styles_span_lines():
         ("z ", frozenset()),
         ("q", {"b", "i"}),
     ]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("", (0, 0)),
+        # схлопнутые пробелы и перевод строки не считаются
+        ("Два  слова.\n<tab>ещё", (13, 3)),
+        # U+00A0 - не граница слова, теги - не символы
+        ("<b>т.\u00a0е.</b>", (5, 1)),
+    ],
+)
+def test_count(text: str, expected: tuple[int, int]):
+    assert count(text) == expected
 
 
 def test_layout_hidden_spaces_stay_on_screen():

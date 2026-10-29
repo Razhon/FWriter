@@ -540,7 +540,9 @@ class MainScreen(Screen):
     def compose(self) -> ComposeResult:
         with TabbedContent():
             yield StartPageTab(self.api, self.storage)
-        yield Footer()
+        with Horizontal(id="bottom_bar"):
+            yield Footer()
+            yield Label(id="chapter_info")
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
         # на стартовой вкладке F1 некуда переходить, а закрыть её нельзя
@@ -551,6 +553,16 @@ class MainScreen(Screen):
 
     def on_tabbed_content_tab_activated(self) -> None:
         self.refresh_bindings()
+        self.show_info()
+
+    def on_chapter_tab_info_changed(self, message: ChapterTab.InfoChanged) -> None:
+        if message.tab is self.query_one(TabbedContent).active_pane:
+            self.show_info()
+
+    def show_info(self) -> None:
+        pane = self.query_one(TabbedContent).active_pane
+        info = pane.info() if isinstance(pane, ChapterTab) else ""
+        self.query_one("#chapter_info", Label).update(info)
 
     # стартовая вкладка не закрывается, она же выбор глав
     def action_start_page(self) -> None:
@@ -590,79 +602,88 @@ class MainScreen(Screen):
             self.notify("Не удалось прочитать черновик главы с диска", severity="error")
             return
         title = chapter.title
-        if self.api is not None and on_site:
-            action = (
-                "Не удалось скачать главу"
-                if text is None
-                else "Не удалось обновить главу"
+        syncing = self.api is not None and on_site
+        if text is None and not syncing:
+            self.notify(
+                "Не удалось скачать главу\nОфлайн, а локальной копии главы нет",
+                severity="warning",
             )
-            # от проверки fetching до add синхронно, так что пока идёт запрос,
-            # эту главу никто не откроет и черновик для неё не появится
-            self.fetching.add(tab_id)
-            try:
-                synced = await sync_chapter(
-                    self.api, self.storage, fic.id, chapter.id, title, fic.readonly
-                )
-            except FicbookAPIError as e:
-                report_api_error(self, e, action)
-            except OSError, ValueError:
-                log.warning(
-                    "глава %s/%s не обновлена", fic.id, chapter.id, exc_info=True
-                )
-                self.notify(
-                    f"{action}\nОшибка чтения или записи на диске", severity="error"
-                )
-            else:
-                text = synced.text
-                if synced.kind == "ff" and synced.site is not None:
-                    v = synced.site
-                    self.notify(
-                        f"Обновлено до правки №{v.site_num} ({v.author_name}, {v.created})"
-                    )
-                elif synced.kind == "merge":
-                    # shortcut: слияния нет до MergeScreen, черновик открывается как есть
-                    self.notify(
-                        "На сайте новая правка, слияние пока недоступно",
-                        severity="warning",
-                    )
-            finally:
-                self.fetching.discard(tab_id)
+            return
+        # вкладка сразу, а правки открываются после синхронизации:
+        # fast-forward не подменит текст под руками
+        tab = ChapterTab(
+            self.storage,
+            fic.id,
+            chapter.id,
+            text or "",
+            None if syncing else self.read_meta(fic.id, chapter.id, title),
+            title,
+            title_editable=can_manage(role, fic.readonly),
+            readonly=fic.readonly,
+            syncing=syncing,
+        )
+        await tabbed.add_pane(tab)
+        show()
+        if not syncing or self.api is None:
+            return
+        # не editor.loading: он снимает фокус, и TabbedContent уходит на стартовую вкладку
         if text is None:
-            if self.api is None:
+            tab.status.update("Глава загружается…")
+        status = None
+        action = (
+            "Не удалось скачать главу" if text is None else "Не удалось обновить главу"
+        )
+        # вкладку могут закрыть и открыть снова, пока идёт запрос: вторая синхронизация
+        # той же главы не нужна
+        self.fetching.add(tab_id)
+        try:
+            synced = await sync_chapter(
+                self.api, self.storage, fic.id, chapter.id, title, fic.readonly
+            )
+        except FicbookAPIError as e:
+            report_api_error(self, e, action)
+        except OSError, ValueError:
+            log.warning("глава %s/%s не обновлена", fic.id, chapter.id, exc_info=True)
+            self.notify(
+                f"{action}\nОшибка чтения или записи на диске", severity="error"
+            )
+        else:
+            text, status = synced.text, synced.status
+            if synced.kind == "ff" and synced.site is not None:
+                v = synced.site
                 self.notify(
-                    "Не удалось скачать главу\nОфлайн, а локальной копии главы нет",
+                    f"Обновлено до правки №{v.site_num} ({v.author_name}, {v.created})"
+                )
+            elif synced.kind == "merge":
+                # shortcut: слияния нет до MergeScreen, черновик открывается как есть
+                self.notify(
+                    "На сайте новая правка, слияние пока недоступно",
                     severity="warning",
                 )
+        finally:
+            self.fetching.discard(tab_id)
+        if not tab.is_attached:
             return
+        if text is None:
+            await tabbed.remove_pane(tab_id)
+            return
+        tab.synced(text, self.read_meta(fic.id, chapter.id, title), status)
 
+    def read_meta(self, fic_id: str, chapter_id: str, title: str) -> ChapterMeta | None:
+        """None: chapter.json повреждён."""
         try:
-            meta = self.storage.read_chapter(fic.id, chapter.id)
-            title = meta.title
+            return self.storage.read_chapter(fic_id, chapter_id)
         except FileNotFoundError:
-            meta = ChapterMeta(title)
+            return ChapterMeta(title)
         except OSError, ValueError:
             log.warning(
-                "chapter.json %s/%s не прочитан", fic.id, chapter.id, exc_info=True
+                "chapter.json %s/%s не прочитан", fic_id, chapter_id, exc_info=True
             )
-            meta = None
             self.notify(
                 "chapter.json главы повреждён: название не будет сохраняться",
                 severity="error",
             )
-
-        await tabbed.add_pane(
-            ChapterTab(
-                self.storage,
-                fic.id,
-                chapter.id,
-                text,
-                meta,
-                title,
-                title_editable=can_manage(role, fic.readonly),
-                readonly=fic.readonly,
-            )
-        )
-        show()
+            return None
 
     def is_open(self, fic_id: str, chapter_id: str | None) -> bool:
         """Открыта ли вкладка главы; chapter_id None - любой главы работы."""

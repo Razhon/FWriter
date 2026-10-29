@@ -281,6 +281,17 @@ def layout(text: str) -> list[Line]:
     return state.lines
 
 
+def count(text: str) -> tuple[int, int]:
+    """символы и слова, которые видит читатель: без тегов, переводов строк и схлопнутых пробелов"""
+    chars = words = 0
+    for line in layout(text):
+        shown = "".join(r.text for r in line.runs if not r.hidden and not r.virtual)
+        chars += len(shown)
+        # не split(): U+00A0 склеивает слова, как у читателя
+        words += len(re.findall("[^ \t\r]+", shown))
+    return chars, words
+
+
 def to_raw(lines: list[Line], line: int, col: int) -> int:
     """клетка экрана -> позиция в сырой строке"""
     at = 0

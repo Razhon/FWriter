@@ -79,3 +79,21 @@ CollapsibleTitle {
 Collapsible > Contents {
     padding: 0 0 1 4;
 }
+
+/* footer и строка о главе справа в одну строку */
+#bottom_bar {
+    dock: bottom;
+    height: 1;
+    background: $footer-background;
+
+    Footer {
+        dock: none;
+        width: 1fr;
+    }
+}
+
+#chapter_info {
+    width: auto;
+    margin: 0 1;
+    color: $footer-foreground;
+}
