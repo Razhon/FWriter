@@ -499,7 +499,10 @@ class ChapterTab(TabPane):
                 self.notify("Глава создана на сайте как черновик")
             elif published.after is not None:
                 v = published.rev
-                if v is None:
+                if published.reverted is not None:
+                    n = published.reverted
+                    self.notify(f"Отправлено откатом к правке номер {n}")
+                elif v is None:
                     self.notify("Отправлено")
                 else:
                     self.notify(f"Отправлено (правка номер {v.site_num})")

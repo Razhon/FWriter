@@ -664,7 +664,11 @@ def test_history_urls():
         FicbookAPI.last_revision_url("/home/versions")
 
 
-def revert(answer: httpx.Response, name: str = "mine-00000000-history-00000000"):
+def revert(
+    answer: httpx.Response,
+    name: str = "mine-00000000-history-00000000",
+    expected: str | None = None,
+):
     sent: list = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -674,7 +678,11 @@ def revert(answer: httpx.Response, name: str = "mine-00000000-history-00000000")
         return answer
 
     url = "/home/versions/mine/2001/history/9001"
-    asyncio.run(mock_api(handler).revert_revision(url))
+    api = mock_api(handler)
+    if expected is None:
+        expected = asyncio.run(api.get_revision(url)).content
+    done = asyncio.run(api.revert_revision(url, expected))
+    assert done == bool(sent)
     return sent
 
 
@@ -701,6 +709,11 @@ def test_revert_revision():
 def test_revert_revision_errors(answer: httpx.Response, error: type[Exception]):
     with pytest.raises(error):
         revert(answer)
+
+
+def test_revert_skips_other_text():
+    # текст правки не тот, что восстановлен: отката нет
+    assert revert(httpx.Response(302), expected="Другой текст.") == []
 
 
 def test_revert_last_revision_raises():

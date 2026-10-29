@@ -311,6 +311,7 @@ class Published:
     created: str | None = None  # id главы, созданной на сайте
     # глава создана, но текст остался в старой папке: повтор создаст дубль
     stranded: bool = False
+    reverted: int | None = None  # номер правки, к которой откатили
 
 
 async def publish_chapter(
@@ -331,7 +332,6 @@ async def publish_chapter(
         storage.write_draft(fic_id, chapter_id, draft.strip(EDGE))
     if create:
         return await _create_chapter(api, storage, fic_id, chapter_id)
-    # shortcut: без revert_revision(), он придёт с DiffScreen
     first = await sync_chapter(api, storage, fic_id, chapter_id, title, False)
     if first.kind == "merge":
         return Published(first)
@@ -345,7 +345,11 @@ async def publish_chapter(
     if error is not None:
         return Published(first, error)
     storage.add_version(fic_id, chapter_id, first.text, meta.title, "publish")
-    await api.save_chapter(fic_id, chapter_id, first.text, meta.title, base)
+    reverted = await _revert(api, storage, fic_id, chapter_id, meta, first.text)
+    if reverted is None:
+        await api.save_chapter(fic_id, chapter_id, first.text, meta.title, base)
+    meta = storage.read_chapter(fic_id, chapter_id)
+    storage.write_chapter(fic_id, chapter_id, replace(meta, restored=None))
     try:
         after = await sync_chapter(api, storage, fic_id, chapter_id, title, False)
     # глава уже на сайте: base догонит следующая синхронизация
@@ -353,10 +357,41 @@ async def publish_chapter(
         log.warning(
             "глава %s/%s: история после отправки", fic_id, chapter_id, exc_info=True
         )
-        return Published(first)
+        return Published(first, reverted=reverted)
     new = storage.read_chapter(fic_id, chapter_id)
     rev = next((v for v in new.versions if v.file == new.base), None)
-    return Published(first, None, after, None if new.base == meta.base else rev)
+    rev = None if new.base == meta.base else rev
+    return Published(first, None, after, rev, reverted=reverted)
+
+
+async def _revert(
+    api: FicbookAPI,
+    storage: ChapterStorage,
+    fic_id: str,
+    chapter_id: str,
+    meta: ChapterMeta,
+    text: str,
+) -> int | None:
+    """6.5: откат к restored, если черновик и название не правили; номер правки."""
+    v = next((v for v in meta.versions if v.file == meta.restored), None)
+    if v is None or meta.title != meta.site_title or meta.history_url is None:
+        return None
+    if storage.read_version(fic_id, chapter_id, v.file) != text:
+        return None
+    revs = await api.get_chapter_revisions(meta.history_url)
+    base = next((b for b in meta.versions if b.file == meta.base), None)
+    # главу правили после синхронизации: откат стёр бы правку, save_chapter её заметит
+    if base is None or revs[0].num != base.site_num:
+        return None
+    for r in revs:
+        if v.site_rev is not None:
+            match = r.rev_id == v.site_rev
+        else:
+            # id ещё не докачан: ключ до минуты, текст сверит revert_revision
+            match = r.author == v.author and (v.created or "")[:16] == r.created
+        if match and r.rev_id is not None and await api.revert_revision(r.url, text):
+            return r.num
+    return None
 
 
 async def _create_chapter(

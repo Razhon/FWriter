@@ -384,15 +384,22 @@ class FicbookAPI:
             can_revert=main.find("form", action=self.REVERT_URL) is not None,
         )
 
-    async def revert_revision(self, url: str) -> None:
-        """Откат главы на сайте к правке url; сайт создаёт новую правку."""
+    async def revert_revision(self, url: str, expected: str) -> bool:
+        """Откат главы на сайте к правке url, если текст после неё - expected.
+
+        False - текст другой, отката нет; иначе сайт создаёт новую правку.
+        """
         response = await self._get(url)
         soup = BeautifulSoup(response.text, "html.parser")
+        after = req(soup.find("div", id="after"), "текст после правки (#after)")
+        if after.get_text() != expected:
+            return False
         form = req(soup.find("form", action=self.REVERT_URL), "форма отката")
         response = await self._post(self.REVERT_URL, data=dict(self._form_fields(form)))
         # успех - 302 на главу, ошибки (400, 403, 404) - HTML
         if not response.has_redirect_location:
             raise APIChangedError(f"Откат ответил {response.status_code}, а не 302")
+        return True
 
     @classmethod
     def _author_slug(cls, link: Tag) -> str:

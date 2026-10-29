@@ -204,6 +204,81 @@ def test_publish_trims_draft_edges_like_site(tmp_path):
     assert sync(api, storage).kind == "same"
 
 
+class RevertingAPI(SavingAPI):
+    """Откат к правке 9001 с текстом "Старое."."""
+
+    def __init__(self, last: Revision) -> None:
+        super().__init__(last)
+        self.reverted: list[str] = []
+
+    async def revert_revision(self, url: str, expected: str) -> bool:
+        if expected != "Старое.":
+            return False
+        self.reverted.append(url)
+        self.last = replace(rev(expected, "2026-10-28T13:00:00"), comment="возврат")
+        self.revs = [info(len(self.revs) + 1), *self.revs]
+        return True
+
+
+class RacedAPI(RevertingAPI):
+    """Соавтор правит главу между синхронизацией и откатом."""
+
+    lists = 0
+
+    async def get_chapter_revisions(self, history_url: str) -> list[RevisionInfo]:
+        self.lists += 1
+        if self.lists == 2:  # второй список при F5 - в _revert
+            self.revs = [info(len(self.revs) + 1), *self.revs]
+        return await super().get_chapter_revisions(history_url)
+
+
+def restore_old(api: FakeAPI, storage: ChapterStorage) -> None:
+    """На сайте "Старое." (9001), потом "Новое."; в черновик восстановлено старое."""
+    sync(api, storage)
+    api.last = rev("Новое.", "2026-10-27T10:00:00")
+    api.revs = [info(2), info(1, "9001")]
+    sync(api, storage)
+    old = storage.read_chapter(FIC, CH).versions[0]
+    restore_version(storage, FIC, CH, "Глава", old)
+    assert storage.read_chapter(FIC, CH).restored == old.file
+
+
+@pytest.mark.parametrize(
+    ("draft", "title", "reverted"),
+    [
+        ("Старое.", "Глава", True),  # восстановили и не правили
+        ("Старое!", "Глава", False),  # правили после восстановления
+        ("Старое.", "Новое", False),  # откат не меняет название
+    ],
+)
+def test_publish_reverts_restored(tmp_path, draft: str, title: str, reverted: bool):
+    storage = ChapterStorage(tmp_path)
+    api = RevertingAPI(rev("Старое."))
+    restore_old(api, storage)
+    storage.write_draft(FIC, CH, draft)
+    storage.set_title(FIC, CH, title)
+
+    published = publish(api, storage)
+    if reverted:
+        assert api.reverted == ["/home/versions/mine/2001/history/9001"]
+        assert api.sent == [] and published.reverted == 1
+        assert published.rev is not None and published.rev.site_num == 3
+    else:
+        assert api.reverted == [] and len(api.sent) == 1
+        assert published.reverted is None
+    assert storage.read_chapter(FIC, CH).restored is None
+
+
+def test_publish_skips_revert_after_site_edit(tmp_path):
+    # правка соавтора после синхронизации: отката нет, save_chapter сверит base
+    storage = ChapterStorage(tmp_path)
+    api = RacedAPI(rev("Старое."))
+    restore_old(api, storage)
+    api.lists = 0
+    publish(api, storage)
+    assert api.reverted == [] and len(api.sent) == 1
+
+
 class HistoryDownAPI(SavingAPI):
     """После отправки история не отвечает."""
 
