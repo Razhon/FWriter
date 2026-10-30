@@ -316,7 +316,7 @@ async def publish_chapter(
     if error is not None:
         return Published(first, error)
     storage.add_version(fic_id, chapter_id, first.text, meta.title, "publish")
-    reverted = await _revert(api, storage, fic_id, chapter_id, meta, first.text)
+    reverted = await _revert(api, storage, fic_id, chapter_id, meta, first)
     if reverted is None:
         await api.save_chapter(fic_id, chapter_id, first.text, meta.title, base)
     meta = storage.read_chapter(fic_id, chapter_id)
@@ -341,20 +341,19 @@ async def _revert(
     fic_id: str,
     chapter_id: str,
     meta: ChapterMeta,
-    text: str,
+    first: Synced,
 ) -> int | None:
-    """6.5: откат к restored, если черновик и название не правили; номер правки."""
+    """6.5: откат к restored, если черновик и название не правили; номер правки.
+
+    Список правок - из first: между ним и откатом нет запросов к сайту.
+    """
+    text = first.text
     v = next((v for v in meta.versions if v.file == meta.restored), None)
-    if v is None or meta.title != meta.site_title or meta.history_url is None:
+    if v is None or meta.title != meta.site_title:
         return None
     if storage.read_version(fic_id, chapter_id, v.file) != text:
         return None
-    revs = await api.get_chapter_revisions(meta.history_url)
-    base = next((b for b in meta.versions if b.file == meta.base), None)
-    # главу правили после синхронизации: откат стёр бы правку, save_chapter её заметит
-    if base is None or revs[0].num != base.site_num:
-        return None
-    for r in revs:
+    for r in first.history:
         if v.site_rev is not None:
             match = r.rev_id == v.site_rev
         else:

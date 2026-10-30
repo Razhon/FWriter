@@ -362,18 +362,6 @@ class RevertingAPI(SavingAPI):
         return True
 
 
-class RacedAPI(RevertingAPI):
-    """Соавтор правит главу между синхронизацией и откатом."""
-
-    lists = 0
-
-    async def get_chapter_revisions(self, history_url: str) -> list[RevisionInfo]:
-        self.lists += 1
-        if self.lists == 2:  # второй список при F5 - в _revert
-            self.revs = [info(len(self.revs) + 1), *self.revs]
-        return await super().get_chapter_revisions(history_url)
-
-
 def restore_old(api: FakeAPI, storage: ChapterStorage) -> None:
     """На сайте "Старое." (9001), потом "Новое."; в черновик восстановлено старое."""
     sync(api, storage)
@@ -400,7 +388,10 @@ def test_publish_reverts_restored(tmp_path, draft: str, title: str, reverted: bo
     storage.write_draft(FIC, CH, draft)
     storage.set_title(FIC, CH, title)
 
+    api.calls.clear()
     published = publish(api, storage)
+    # список правок для отката - из синхронизации перед отправкой
+    assert api.calls.count(MINE) == 2  # до и после отправки
     if reverted:
         assert api.reverted == ["/home/versions/mine/2001/history/9001"]
         assert api.sent == [] and published.reverted == 1
@@ -409,16 +400,6 @@ def test_publish_reverts_restored(tmp_path, draft: str, title: str, reverted: bo
         assert api.reverted == [] and len(api.sent) == 1
         assert published.reverted is None
     assert storage.read_chapter(FIC, CH).restored is None
-
-
-def test_publish_skips_revert_after_site_edit(tmp_path):
-    # правка соавтора после синхронизации: отката нет, save_chapter сверит base
-    storage = ChapterStorage(tmp_path)
-    api = RacedAPI(rev("Старое."))
-    restore_old(api, storage)
-    api.lists = 0
-    publish(api, storage)
-    assert api.reverted == [] and len(api.sent) == 1
 
 
 class HistoryDownAPI(SavingAPI):
