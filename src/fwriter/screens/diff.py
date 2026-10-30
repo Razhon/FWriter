@@ -18,8 +18,10 @@ from ..core.storage import ChapterMeta, ChapterStorage, Version
 from .api_errors import report_disk_error
 from .widgets import CONFIRM_DELAY
 
-# слова, пробелы (только U+0020 и \t) и переводы строк
-_TOKEN = re.compile(r"[ \t]+|\n|[^ \t\n]+")
+# слова, невидимые символы из _SHOW_BLANK и переводы строк
+_TOKEN = re.compile(r"[ \t\r\xa0]+|\n|[^ \t\r\xa0\n]+")
+# изменённые невидимые символы рисуются знаками, иначе правку не видно
+_SHOW_BLANK = str.maketrans({" ": "·", "\t": "→", "\r": "␍", "\xa0": "°"})
 
 SOURCES = {"manual": "черновик", "publish": "отправка"}
 FILTERS = ("все правки", "без правок оформления")
@@ -28,7 +30,7 @@ type Block = tuple[int, list[str], list[str], str | None]
 
 
 def diff_text(old: list[str], new: list[str], mark: Style | str = "reverse") -> Text:
-    """Строки new, слова, которых нет в old, - стилем mark."""
+    """Строки new, слова, которых нет в old, - стилем mark; изменённые пробелы видны."""
     out = Text()
     # сначала по абзацам: пословно по всему блоку - минуты на сотне абзацев
     sm = SequenceMatcher(None, old, new, autojunk=False)
@@ -42,7 +44,10 @@ def diff_text(old: list[str], new: list[str], mark: Style | str = "reverse") -> 
         a = _TOKEN.findall("\n".join(old[i1:i2]))
         words = SequenceMatcher(None, a, b, autojunk=False)
         for t, _, _, k1, k2 in words.get_opcodes():
-            out.append("".join(b[k1:k2]), None if t == "equal" else mark)
+            part = "".join(b[k1:k2])
+            if t != "equal" and not part.strip(" \t\r\xa0\n"):
+                part = part.translate(_SHOW_BLANK)
+            out.append(part, None if t == "equal" else mark)
     return out
 
 
@@ -220,15 +225,33 @@ class DiffScreen(Screen[Version | None]):
         self.fill()
         self.compare()
 
-    def fill(self) -> None:
+    def fill(self, keep_scroll: bool = False) -> None:
+        """keep_scroll - не прокручивать списки к выбору (версия добавилась сама)."""
         rows = [("Черновик", "", "", ""), *(version_cells(v) for v in self.versions)]
         lines = aligned(rows)
         files = [None, *(v.file for v in self.versions)]
         for id, file in (("#diff_old", self.old), ("#diff_new", self.new)):
             versions = self.query_one(id, OptionList)
+            y = versions.scroll_y
             with versions.prevent(OptionList.OptionHighlighted):
                 versions.set_options(lines)
                 versions.highlighted = files.index(file)
+            if keep_scroll:
+                # после прокрутки к выбору, которую запускает highlighted
+                versions.call_after_refresh(
+                    versions.scroll_to, y=y, animate=False, immediate=True
+                )
+
+    def add(self, version: Version, at: int | None = None) -> None:
+        """Новая версия в списки; выбор и прокрутка в "Было" и "Стало" остаются.
+
+        at - место в versions, как у add_version(); по умолчанию в конец.
+        """
+        if at is None:
+            self.meta.versions.append(version)
+        else:
+            self.meta.versions.insert(at, version)
+        self.fill(keep_scroll=True)
 
     def text(self, file: str | None) -> list[str]:
         if file not in self.texts:
@@ -371,8 +394,7 @@ class DiffScreen(Screen[Version | None]):
             except (OSError, ValueError) as e:
                 report_disk_error(self, e, "Не удалось сохранить версию", self.where)
                 return
-            self.meta.versions.append(v)
-            self.fill()
+            self.add(v)
             self.notify("Черновик сохранён версией")
 
         self.app.push_screen(CommentScreen(), saved)

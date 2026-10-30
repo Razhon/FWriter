@@ -68,12 +68,22 @@ def test_beta_page():
         "Глава 2. Название 2",
         "Глава 3. Название 3",
     ]
+    # неопубликованная глава помечена классом part-draft
+    assert fics[0].chapters[0].draft
+    assert not fics[1].chapters[0].draft
 
 
 def test_changed_layout_raises():
     broken = BETA_PAGE.replace("myfic-header", "renamed-header")
 
     with pytest.raises(APIChangedError, match="названием фанфика"):
+        parse(broken)
+
+
+def test_chapter_link_without_class_raises():
+    broken = BETA_PAGE.replace('<a class="part word-break" href', "<a href", 1)
+
+    with pytest.raises(APIChangedError, match="классы ссылки на главу"):
         parse(broken)
 
 

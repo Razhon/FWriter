@@ -3,7 +3,7 @@ import logging
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, cast
 
 from textual import on, work
 from textual.app import ComposeResult
@@ -11,16 +11,19 @@ from textual.binding import Binding, BindingType
 from textual.content import Content
 from textual.message import Message
 from textual.timer import Timer
-from textual.widgets import Input, Label, TabbedContent, TabPane, TextArea
+from textual.widgets import Input, TabbedContent, TabPane, TextArea
+from textual.widgets.text_area import Document
 
 from ..core.api.client import FicbookAPI
 from ..core.api.errors import FicbookAPIError, SiteRejectedError
-from ..core.markup import count
+from ..core.api.models import RevisionInfo
+from ..core.markup import Edit, Tweak, check, count, para_style, paras_touched, tweak
 from ..core.merge import Choice
-from ..core.storage import ChapterMeta, ChapterStorage, LastMerge
+from ..core.storage import ChapterMeta, ChapterStorage, LastMerge, Version
 from ..core.sync import (
     Parts,
     Synced,
+    fetch_revisions,
     finish_merge,
     load_merge,
     postpone_merge,
@@ -32,7 +35,7 @@ from ..core.sync import (
 from .api_errors import report_api_error, report_disk_error
 from .diff import DiffScreen, rev_line, version_line
 from .editor import ChapterEditor
-from .menu import MenuScreen
+from .menu import HelpScreen, MenuScreen
 from .merge import MergeScreen
 from .widgets import CONFIRM_DELAY
 
@@ -56,6 +59,8 @@ class ChapterTab(TabPane):
         Binding("f4", "review", "Слияние"),
         Binding("f5", "publish", "Отправить"),
         Binding("f6", "status", "Статус"),
+        Binding("f8", "help", "Оформление"),
+        Binding("f9", "tweaks", "Твики"),
         Binding("escape", "hide_title", show=False),
     ]
     # param главы: действие сайта, пункт меню, текст ошибки
@@ -136,17 +141,21 @@ class ChapterTab(TabPane):
         # время первого F5: отправляет второе нажатие
         self.publish_armed: float | None = None
         self.site_status: int | None = None
+        # текст сразу после твика F9: если он прежний, твик продолжает серию
+        self.tweaked: str | None = None
+        # список правок последней синхронизации: по нему идёт докачка
+        self.history: tuple[RevisionInfo, ...] = ()
         self.save_timer: Timer | None = None
         # ссылки, а не query_one: в on_unmount дочерние виджеты уже сняты
         self.title_input = Input(title)
         self.title_input.display = False
         self.title_before = title
         self.editor = ChapterEditor()
+        # что сейчас идёт, первым в строке о главе: плашка над текстом сдвигала бы его;
         # не editor.loading: он снимает фокус, и TabbedContent уходит на стартовую вкладку
-        self.status = Label(
-            "Проверяем сайт…" if self.has_draft else "Глава загружается…"
-        )
-        self.status.display = syncing
+        self.note: str | None = None
+        if syncing:
+            self.note = "Проверяем сайт…" if self.has_draft else "Глава загружается…"
         super().__init__(Content(title))
         self.set_text(text or "", None if syncing else self.read_meta())
 
@@ -156,8 +165,13 @@ class ChapterTab(TabPane):
         return self.syncing or self.occupied
 
     @contextmanager
-    def working(self) -> Iterator[None]:
-        """Слияние или смена статуса: F4-F6 и закрытие недоступны."""
+    def working(self, halt: bool = False) -> Iterator[None]:
+        """Слияние, дифф или смена статуса: F3-F6 и закрытие недоступны.
+
+        halt - на время прервать докачку: start_merge() пишет chapter.json в потоке.
+        """
+        if halt:
+            self.stop_fetch()
         self.occupied = True
         self.refresh_bindings()
         try:
@@ -165,6 +179,8 @@ class ChapterTab(TabPane):
         finally:
             self.occupied = False
             self.refresh_bindings()
+            if halt and not self.syncing:
+                self.fetch()
 
     def set_text(self, text: str, meta: ChapterMeta | None) -> None:
         self.saved_title = None if self.syncing or meta is None else meta.title
@@ -221,11 +237,11 @@ class ChapterTab(TabPane):
 
     def exchanging(self, note: str) -> None:
         """Правки закрыты до synced(): идёт обмен с сайтом."""
+        self.stop_fetch()
         self.syncing = True
         self.editor.read_only = True
         self.title_input.disabled = True
-        self.status.update(note)
-        self.status.display = True
+        self.note = note
         self.refresh_bindings()
         self.post_message(self.InfoChanged(self))
 
@@ -237,7 +253,7 @@ class ChapterTab(TabPane):
         self.site_status = status
         # синхронизация берёт название с сайта и отмечает отправленное
         self.post_message(self.TitleSaved(self))
-        self.status.display = False
+        self.note = None
         self.set_text(text, meta)
         self.refresh_bindings()
         self.post_message(self.InfoChanged(self))
@@ -245,7 +261,7 @@ class ChapterTab(TabPane):
 
     def info(self) -> str:
         """Статус на сайте, состояние черновика, символы и слова."""
-        parts = []
+        parts = [] if self.note is None else [self.note]
         if self.site_status is not None:
             parts.append(STATUSES.get(self.site_status, f"статус {self.site_status}"))
         text = self.editor.text
@@ -268,7 +284,6 @@ class ChapterTab(TabPane):
 
     def compose(self) -> ComposeResult:
         yield self.title_input
-        yield self.status
         yield self.editor
 
     def on_mount(self) -> None:
@@ -296,6 +311,8 @@ class ChapterTab(TabPane):
             return not self.readonly and not self.busy
         if action == "diff":
             return not self.busy
+        if action == "tweaks":
+            return not self.readonly and not self.busy
         if action == "status":
             return (
                 self.api is not None
@@ -379,13 +396,26 @@ class ChapterTab(TabPane):
         """Догнать черновик до сайта; fast-forward не подменит текст под руками."""
         if self.api is None:
             return
-        text = self.disk_text if self.has_draft else None
         action = (
             "Не удалось обновить главу"
             if self.has_draft
             else "Не удалось скачать главу"
         )
-        status, synced = None, None
+        synced = await self.pull(action)
+        # после слияния докачку запустит working()
+        if synced is None:
+            return
+        if synced.kind == "merge":
+            self.merge(synced)
+        else:
+            self.fetch()
+
+    async def pull(self, action: str) -> Synced | None:
+        """Синхронизация и текст после неё во вкладку; None - сайт не ответил."""
+        assert self.api is not None
+        text = self.disk_text if self.has_draft else None
+        status, synced = self.site_status, None
+        self.stop_fetch()
         try:
             synced = await sync_chapter(
                 self.api,
@@ -404,10 +434,49 @@ class ChapterTab(TabPane):
             self.report_synced(synced)
         if text is None:
             self.post_message(self.Dropped(self))
-            return
+            return None
         self.synced(text, self.read_meta(), status)
-        if synced is not None and synced.kind == "merge":
-            self.merge(synced)
+        if synced is not None:
+            self.history = synced.history
+        return synced
+
+    def stop_fetch(self) -> None:
+        # sync_chapter читает chapter.json до сети и пишет после: докачка затёрлась бы
+        self.workers.cancel_group(self, "fetch")
+
+    @work(group="fetch", exclusive=True)
+    async def fetch(self) -> None:
+        """Шаг 5 синхронизации: правки сайта в версии, без уведомлений."""
+        if self.api is None or not self.history:
+            return
+        try:
+            n = await fetch_revisions(
+                self.api,
+                self.storage,
+                self.fic_id,
+                self.chapter_id,
+                self.title_input.value,
+                self.history,
+                self.fetched,
+            )
+        except FicbookAPIError, OSError, ValueError:
+            # продолжится при следующей синхронизации
+            log.warning(
+                "глава %s/%s: докачка правок прервана",
+                self.fic_id,
+                self.chapter_id,
+                exc_info=True,
+            )
+        else:
+            log.info(
+                "глава %s/%s: докачано правок: %d", self.fic_id, self.chapter_id, n
+            )
+
+    def fetched(self, version: Version, at: int) -> None:
+        # открытый дифф этой главы сразу видит новую правку, даже под диалогом
+        for screen in self.app.screen_stack:
+            if isinstance(screen, DiffScreen) and screen.where == self.where:
+                screen.add(version, at)
 
     def report_synced(self, synced: Synced) -> None:
         if synced.title_conflict is not None:
@@ -475,6 +544,7 @@ class ChapterTab(TabPane):
         else:
             synced = published.after or published.first
             status, error = synced.status, published.error
+            self.history = synced.history
             if not published.stranded:
                 created = published.created
             self.report_synced(published.first)
@@ -524,6 +594,8 @@ class ChapterTab(TabPane):
         self.synced(self.editor.text if text is None else text, meta, status)
         if merging is not None:
             self.merge(merging)
+        else:
+            self.fetch()
         if error is not None:
             self.editor.cursor_location = (error.line, error.col)
             self.notify(
@@ -536,7 +608,7 @@ class ChapterTab(TabPane):
         """Шаг 4 синхронизации: снимок черновика, MergeScreen и результат в черновик."""
         if synced.site is None or self.busy:
             return
-        with self.working():
+        with self.working(halt=True):
             try:
                 merge, parts, choices = await asyncio.to_thread(
                     start_merge,
@@ -633,7 +705,7 @@ class ChapterTab(TabPane):
         """F4: последнее слияние с прежними решениями."""
         if self.busy:
             return
-        with self.working():
+        with self.working(halt=True):
             try:
                 loaded = await asyncio.to_thread(
                     load_merge, self.storage, self.fic_id, self.chapter_id
@@ -736,3 +808,126 @@ class ChapterTab(TabPane):
             # внутри with: bindings пересчитаются уже с новым статусом
             self.site_status = status
             self.post_message(self.InfoChanged(self))
+
+    TWEAKS: ClassVar[dict[Tweak, str]] = {
+        "typography": "Вся типографика сразу",
+        "blank": "Абзацы: пустая строка",
+        "indent": "Абзацы: красная строка",
+        "indent_blank": "Абзацы: красная и пустая строка",
+        "dashes": "Тире",
+        "quotes": "Кавычки «» и „“",
+        "ellipsis": "Многоточие",
+        "spaces": "Чистка пробелов",
+        "fix_tags": "Починка тегов",
+    }
+
+    def action_help(self) -> None:
+        self.app.push_screen(HelpScreen())
+
+    def action_tweaks(self) -> None:
+        if self.save():
+            self.tweaks()
+
+    @work(group="sync")
+    async def tweaks(self) -> None:
+        """F9: свежий текст с сайта, меню с числами абзацев, пункт - одной правкой."""
+        if self.busy:
+            return
+        # твик меняет много абзацев: правки сайта сливаем до него, а не после
+        if self.api is not None and not self.creates:
+            self.exchanging("Проверяем сайт…")
+            synced = await self.pull("Сайт не проверен")
+            if synced is not None and synced.kind == "merge":
+                self.notify("Сначала слияние с правкой сайта, потом снова F9")
+                self.merge(synced)
+                return
+            if synced is not None:
+                self.fetch()
+        text = self.editor.text
+        if (error := check(text)) is not None:
+            self.editor.cursor_location = (error.line, error.col)
+            self.notify(
+                f"Твики недоступны: ошибка разметки, строка {error.line + 1}: "
+                f"{error.message}",
+                severity="error",
+            )
+            return
+        doc = self.editor.document
+        assert isinstance(doc, Document)
+        a, b = sorted(map(doc.get_index_from_location, self.editor.selection))
+        sel = (a, b) if a != b else None
+        with self.working():
+            self.note = "Считаем…"
+            self.post_message(self.InfoChanged(self))
+            try:
+                plan = await asyncio.to_thread(self.plan_tweaks, text, sel)
+            finally:
+                self.note = None
+                self.post_message(self.InfoChanged(self))
+            style = plan.pop("style")
+            items, disabled = [], set()
+            for name, label in self.TWEAKS.items():
+                n = plan[name][2]
+                if name == style:
+                    label += " (сейчас)"
+                items.append((name, f"{label} · {n}"))
+                if not n:
+                    disabled.add(name)
+            title = "Твики: " + ("выделение" if sel else "вся глава")
+            if style in ("mixed", "plain"):
+                title += " · абзацы " + (
+                    "смешанные" if style == "mixed" else "сплошные"
+                )
+            chosen = await self.app.push_screen_wait(
+                MenuScreen(title, items, disabled=disabled)
+            )
+        if chosen is None:
+            return
+        if self.editor.text != text:
+            self.notify("Текст изменился, пока открывалось меню: нажмите F9 ещё раз")
+            return
+        name = cast(Tweak, chosen)
+        edits, bad, _ = plan[name]
+        self.apply_tweak(self.TWEAKS[name], edits, bad)
+
+    @staticmethod
+    def plan_tweaks(text: str, sel: tuple[int, int] | None) -> dict:
+        """Правки всех пунктов F9 и число абзацев; style - способ отделения абзацев."""
+        plan: dict = {"style": para_style(text)}
+        for name in ChapterTab.TWEAKS:
+            edits, bad = tweak(text, name, sel)
+            plan[name] = (edits, bad, paras_touched(text, edits) if edits else 0)
+        return plan
+
+    def apply_tweak(self, label: str, edits: list[Edit], bad: list[int]) -> None:
+        text = self.editor.text
+        # первый твик серии - версией: вся серия откатывается одним восстановлением
+        if text != self.tweaked:
+            if not self.save():
+                return
+            try:
+                self.storage.add_version(
+                    self.fic_id,
+                    self.chapter_id,
+                    text,
+                    self.title_input.value,
+                    "manual",
+                    f"до твика „{label}“",
+                )
+            except (OSError, ValueError) as e:
+                report_disk_error(self, e, "Не удалось сохранить версию", self.where)
+                return
+        cursor = self.editor.cursor_location
+        self.editor.apply_edits(edits)
+        self.editor.cursor_location = cursor
+        self.tweaked = self.editor.text
+        if bad:
+            # номер строки после правок: чистка пробелов убирает пустые строки в начале
+            at = len("\n".join(text.split("\n")[: bad[0]])) + (bad[0] > 0)
+            at += sum(len(r) - (e - s) for s, e, r in edits if e <= at)
+            doc = self.editor.document
+            assert isinstance(doc, Document)
+            self.editor.cursor_location = doc.get_location_from_index(at)
+            self.notify(
+                f"Кавычки не расставлены в абзацах: {len(bad)}", severity="warning"
+            )

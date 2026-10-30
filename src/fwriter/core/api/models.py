@@ -21,6 +21,7 @@ class UserInfo:
 class SlimChapterInfo:
     id: str
     title: str
+    draft: bool = False  # на сайте не опубликована
 
 
 @dataclass

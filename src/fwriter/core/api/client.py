@@ -98,6 +98,8 @@ class FicbookAPI:
         self._throttle = asyncio.Lock()
         # время начала последних RATE_LIMIT запросов
         self._sent: deque[float] = deque(maxlen=self.RATE_LIMIT)
+        # докачка правок вкладок идёт по очереди: см. fetch_revisions()
+        self.fetching = asyncio.Lock()
 
     @classmethod
     def parse_cookies(cls, text: str) -> dict[str, str] | None:
@@ -217,7 +219,13 @@ class FicbookAPI:
                         f"текст названия главы {chapter_id}",
                     )
 
-                    chapters.append(SlimChapterInfo(chapter_id, chapter_title))
+                    # классы есть у любой главы, part-draft - только у неопубликованной
+                    classes = req(
+                        ch_link.get_attribute_list("class"),
+                        f"классы ссылки на главу {chapter_id}",
+                    )
+                    draft = "part-draft" in classes
+                    chapters.append(SlimChapterInfo(chapter_id, chapter_title, draft))
 
             fics.append(Fic(fic_id_raw, title, chapters))
         return fics

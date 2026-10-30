@@ -1,4 +1,5 @@
 import bisect
+import itertools
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -550,8 +551,12 @@ _DASH = re.compile(r"(?:^|(?<=[ \t\xa0]))(?:--|–|-)(?=[ \t\xa0])")
 # разделитель сцены без <center>
 _DASHES_ONLY = re.compile(r"[-–— \t\xa0]*")
 _ELLIPSIS = re.compile(r"(?<![.?!])\.\.\.(?!\.)")
+# пробел перед знаком убирается только после слова или скобки: после тире или
+# двоеточия знак отдельный; многоточие перед словом открывает фразу
 _SPACES = re.compile(
-    r"(?P<drop>^[ \t]+|[ \t]+\Z|[ \t]+(?=[,.!?:;…]))|(?P<one>[ \t]{2,}|\t)"
+    r"(?P<drop>^[ \t]+|[ \t]+\Z"
+    r"|(?<=[\w)\]»“\"'])[ \t]+(?=[,.!?:;…])(?!(?:\.\.\.|…)\w))"
+    r"|(?P<one>[ \t]{2,}|\t)"
 )
 
 
@@ -837,17 +842,76 @@ def _typo(lines: list[str], last: bool) -> list[str]:
     return text.split("\n")
 
 
+def _retagged(lines: list[str]) -> list[str]:
+    text = "\n".join(lines)
+    return apply(text, fix_tags(text)).split("\n")
+
+
+_KINDS = ("оформление абзацев", "типографика", "разметка")
+
+
+def _forms(lines: list[str], last: bool) -> dict[tuple[str, ...], list[str]]:
+    # разметка и типографика дорогие: каждое сочетание считается один раз
+    retagged = _retagged(lines)
+    return {
+        (): lines,
+        ("типографика",): _typo(lines, last),
+        ("разметка",): retagged,
+        ("типографика", "разметка"): _typo(retagged, last),
+    }
+
+
 def tweak_kind(old: list[str], new: list[str], last: bool) -> str | None:
     """пометка блока диффа, если стороны отличаются только оформлением"""
     if old == new:
         return None
+    # частый случай после твика абзацев, без дорогих _forms
     if _untab(old) == _untab(new):
         return "оформление абзацев"
-    if _typo(old, last) == _typo(new, last):
-        return "типографика"
-    if _untab(_typo(old, last)) == _untab(_typo(new, last)):
-        return "оформление абзацев, типографика"
-    old_text, new_text = "\n".join(old), "\n".join(new)
-    if apply(old_text, fix_tags(old_text)) == apply(new_text, fix_tags(new_text)):
-        return "разметка"
+    sides = _forms(old, last), _forms(new, last)
+    # самая короткая пометка: сначала по одному виду, потом сочетания
+    for n in range(1, len(_KINDS) + 1):
+        for kinds in itertools.combinations(_KINDS, n):
+            key = tuple(k for k in kinds if k != "оформление абзацев")
+            a, b = (side[key] for side in sides)
+            if "оформление абзацев" in kinds:
+                a, b = _untab(a), _untab(b)
+            if a == b:
+                return ", ".join(kinds)
     return None
+
+
+# меню F9
+
+Tweak = Literal[
+    "typography",
+    "blank",
+    "indent",
+    "indent_blank",
+    "dashes",
+    "quotes",
+    "ellipsis",
+    "spaces",
+    "fix_tags",
+]
+
+
+def tweak(
+    text: str, name: Tweak, sel: tuple[int, int] | None = None
+) -> tuple[list[Edit], list[int]]:
+    """правки пункта меню F9 и строки, где кавычки не расставлены"""
+    match name:
+        case "typography":
+            return typography(text, sel)
+        case "quotes":
+            return quotes(text, sel)
+        case "blank" | "indent" | "indent_blank":
+            return restyle(text, name, sel), []
+        case "dashes":
+            return dashes(text, sel), []
+        case "ellipsis":
+            return ellipsis(text, sel), []
+        case "spaces":
+            return spaces(text, sel), []
+        case "fix_tags":
+            return fix_tags(text, sel), []

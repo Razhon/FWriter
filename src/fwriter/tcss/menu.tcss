@@ -21,3 +21,7 @@ MenuScreen {
     height: auto;
     margin-bottom: 1;
 }
+
+#help {
+    margin: 0 1 1 1;
+}

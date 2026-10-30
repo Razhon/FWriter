@@ -332,10 +332,12 @@ class ChapterStorage:
         site_num: int | None = None,
         author: str | None = None,
         author_name: str | None = None,
+        at: int | None = None,
     ) -> Version:
         """Снимок text в versions/ и запись о нём в chapter.json.
 
         created по умолчанию - текущее время; у ревизий сайта - дата с сайта.
+        at - место в versions (докачанная правка сайта); по умолчанию в конец.
         """
         # до снимка: при повреждённом chapter.json не будет лишнего файла
         chapter = self.load_chapter(fic_id, chapter_id, title)
@@ -366,7 +368,11 @@ class ChapterStorage:
             author=author,
             author_name=author_name,
         )
-        chapter.versions.append(version)
+        # порядок versions - хронология записи: даты сайта по Москве, свои - по местным часам
+        if at is None:
+            chapter.versions.append(version)
+        else:
+            chapter.versions.insert(at, version)
         self.write_chapter(fic_id, chapter_id, chapter)
         return version
 

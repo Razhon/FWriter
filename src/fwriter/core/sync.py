@@ -1,6 +1,8 @@
 """Синхронизация главы с сайтом (шаги 1-4 п. 5 дизайна) и отправка на сайт."""
 
+import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -28,6 +30,7 @@ class Synced:
     status: int | None = None  # param главы на сайте; None у readonly и не у автора
     title_conflict: str | None = None  # название на сайте, если поменяли оба
     revs: tuple[RevisionInfo, ...] = ()  # у merge: правки сайта новее base
+    history: tuple[RevisionInfo, ...] = ()  # весь список правок, для докачки
 
 
 def _same(
@@ -108,7 +111,9 @@ async def sync_chapter(
     if known is not None and base is not None and base.file == known.file:
         draft = storage.read_draft(fic_id, chapter_id)
         text = last.content if draft is None else draft
-        return Synced("same", text, status=status, title_conflict=conflict)
+        return Synced(
+            "same", text, status=status, title_conflict=conflict, history=tuple(revs)
+        )
 
     site = known or storage.add_version(
         fic_id,
@@ -138,12 +143,95 @@ async def sync_chapter(
             for r in revs
             if base is None or base.site_num is None or r.num > base.site_num
         )
-        return Synced("merge", draft, site, status, conflict, newer)
+        return Synced("merge", draft, site, status, conflict, newer, tuple(revs))
     if kind != "same":
         storage.write_draft(fic_id, chapter_id, last.content)
     meta = storage.load_chapter(fic_id, chapter_id, title)
     storage.write_chapter(fic_id, chapter_id, replace(meta, base=site.file))
-    return Synced(kind, last.content, site if kind == "ff" else None, status, conflict)
+    ff = site if kind == "ff" else None
+    return Synced(kind, last.content, ff, status, conflict, history=tuple(revs))
+
+
+FETCH_LIMIT = 30  # правок за одну синхронизацию: каждая - полный текст главы
+FETCH_PAUSE = 1.0  # секунд между страницами: запас лимита для действий человека
+
+
+async def fetch_revisions(
+    api: FicbookAPI,
+    storage: ChapterStorage,
+    fic_id: str,
+    chapter_id: str,
+    title: str,
+    revs: tuple[RevisionInfo, ...],
+    saved: Callable[[Version, int], None] | None = None,
+    pause: float = FETCH_PAUSE,
+) -> int:
+    """Докачка правок без локальной версии; вернёт число скачанных.
+
+    Каждая правка пишется сразу: прерванная докачка ничего не теряет.
+    saved получает каждую новую версию и её место в versions.
+    """
+    # пауза оставляет запас лимита, только пока качает одна вкладка
+    async with api.fetching:
+        known = {
+            v.site_rev for v in storage.load_chapter(fic_id, chapter_id, title).versions
+        }
+        todo = [r for r in revs if r.rev_id and r.rev_id not in known][:FETCH_LIMIT]
+        # новейшие FETCH_LIMIT, но от старых к новым: место версии ищется по site_num,
+        # а у бывшей последней правки он верный, только когда её очередь прошла
+        for i, info in enumerate(reversed(todo)):
+            if i:
+                await asyncio.sleep(pause)
+            rev = await api.get_revision(info.url)
+            meta = storage.load_chapter(fic_id, chapter_id, title)
+            # бывшая последняя правка: скачана без id, пока он не был виден
+            old = next(
+                (
+                    v
+                    for v in meta.versions
+                    if v.source != "manual"
+                    and v.site_rev is None
+                    and _same(storage, fic_id, chapter_id, v, rev)
+                ),
+                None,
+            )
+            if old is not None:
+                meta.versions = [
+                    # номер мог сдвинуться, если сайт удалил старые правки
+                    replace(v, site_rev=info.rev_id, site_num=info.num)
+                    if v.file == old.file
+                    else v
+                    for v in meta.versions
+                ]
+                storage.write_chapter(fic_id, chapter_id, meta)
+                continue
+            # перед первой правкой сайта новее этой: пропущенная между синхронизациями
+            # бывает новее записанных; в конец не встанет, versions[-1] не меняется
+            at = next(
+                (
+                    i
+                    for i, v in enumerate(meta.versions)
+                    if v.site_num is not None and v.site_num > info.num
+                ),
+                0,
+            )
+            version = storage.add_version(
+                fic_id,
+                chapter_id,
+                rev.content,
+                meta.site_title or title,
+                "site",
+                rev.comment,
+                created=rev.created or info.created,
+                site_rev=info.rev_id,
+                site_num=info.num,
+                author=rev.author,
+                author_name=rev.author_name,
+                at=at,
+            )
+            if saved is not None:
+                saved(version, at)
+        return len(todo)
 
 
 type Parts = list[str | Hunk]

@@ -15,6 +15,7 @@ from fwriter.core.api.models import (
 from fwriter.core.merge import Hunk, Manual
 from fwriter.core.storage import ChapterMeta, ChapterStorage
 from fwriter.core.sync import (
+    fetch_revisions,
     finish_merge,
     load_merge,
     postpone_merge,
@@ -156,6 +157,112 @@ def test_site_nums_follow_site(tmp_path):
     sync(api, storage)
     nums = [v.site_num for v in storage.read_chapter(FIC, CH).versions]
     assert nums == [1, 2]
+
+
+class PagesAPI(FakeAPI):
+    """Страницы правок по адресу; адреса из fail роняют сеть."""
+
+    def __init__(self, pages: dict[str, Revision], fail: str = "") -> None:
+        super().__init__(rev(""))
+        self.pages, self.fail = pages, fail
+
+    async def get_revision(self, url: str) -> Revision:
+        self.calls.append(url)
+        if url == self.fail:
+            raise NetworkError
+        return self.pages[url]
+
+
+def test_fetch_revisions(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.add_version(
+        FIC, CH, "Первая.", "Глава", "site", site_rev="9001", site_num=1
+    )
+    # бывшая последняя правка: скачана без id, номер 5 устарел - сайт удалил две
+    storage.add_version(
+        FIC,
+        CH,
+        "Третья.",
+        "Глава",
+        "site",
+        created="2026-10-26T00:33:30",
+        author="3001",
+        site_num=5,
+    )
+    revs = (info(4), info(3, "9003"), info(2, "9002"), info(1, "9001"))
+    pages = {
+        revs[1].url: rev("Третья."),
+        revs[2].url: rev("Вторая.", "2026-10-25T10:00:00"),
+    }
+    api = PagesAPI(pages, fail=revs[1].url)
+    saved = []
+    with pytest.raises(NetworkError):
+        asyncio.run(
+            fetch_revisions(
+                api, storage, FIC, CH, "Глава", revs, lambda *a: saved.append(a), 0
+            )
+        )
+    # от старых к новым, успевшее записаться остаётся
+    assert api.calls == [revs[2].url, revs[1].url]
+    versions = storage.read_chapter(FIC, CH).versions
+    assert [v.site_rev for v in versions] == ["9001", "9002", None]
+    new = versions[1]
+    assert saved == [(new, 1)]
+    assert (new.site_num, new.source) == (2, "site")
+    assert storage.read_version(FIC, CH, new.file) == "Вторая."
+
+    api = PagesAPI(pages)
+    n = asyncio.run(fetch_revisions(api, storage, FIC, CH, "Глава", revs, pause=0))
+    # известная правка не скачивается, бывшая последняя получает id и номер
+    assert n == 1 and api.calls == [revs[1].url]
+    versions = storage.read_chapter(FIC, CH).versions
+    assert [(v.site_rev, v.site_num) for v in versions] == [
+        ("9001", 1),
+        ("9002", 2),
+        ("9003", 3),
+    ]
+
+
+def test_fetch_revisions_between_known(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    # синхронизации записали правки 5 и 7, а 6 вышла между ними
+    for num in (5, 7):
+        storage.add_version(
+            FIC, CH, f"{num}.", "Глава", "site", site_rev=f"900{num}", site_num=num
+        )
+    storage.add_version(FIC, CH, "Своё.", "Глава", "manual")
+    revs = (info(7, "9007"), info(6, "9006"), info(5, "9005"))
+    api = PagesAPI({revs[1].url: rev("6.", "2026-10-25T10:00:00")})
+    asyncio.run(fetch_revisions(api, storage, FIC, CH, "Глава", revs, pause=0))
+    versions = storage.read_chapter(FIC, CH).versions
+    assert [v.site_num for v in versions] == [5, 6, 7, None]
+
+
+def test_fetch_revisions_one_tab_at_a_time(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    chapters = {
+        "2001": (info(3), info(2, "9002"), info(1, "9001")),
+        "2002": (info(3), info(2, "9102"), info(1, "9101")),
+    }
+    pages = {r.url: rev(r.rev_id or "") for revs in chapters.values() for r in revs}
+    api = PagesAPI(pages)
+
+    async def both() -> None:
+        await asyncio.gather(
+            *(
+                fetch_revisions(api, storage, FIC, ch, "Глава", revs, pause=0)
+                for ch, revs in chapters.items()
+            )
+        )
+
+    asyncio.run(both())
+    # пауза одной докачки не пускает вперёд другую: лимит сайта общий
+    assert [url.rsplit("/", 1)[1] for url in api.calls] == [
+        "9001",
+        "9002",
+        "9101",
+        "9102",
+    ]
 
 
 class SavingAPI(FakeAPI):
@@ -582,6 +689,11 @@ def test_postponed_merge_review_takes_new_edits(tmp_path):
     assert synced.site is not None
     merge, parts, _ = start_merge(storage, FIC, CH, "Глава", synced.site)
     assert postpone_merge(storage, FIC, CH, "Глава", merge, parts, {0: "site"})
+    # докачка после снимка: последним он остаётся, даже если дата сайта (по Москве)
+    # позже его даты по местным часам
+    storage.add_version(
+        FIC, CH, "Старое.", "Глава", "site", created="2099-01-01T00:00:00", at=0
+    )
     # F4 без правок: тот же снимок и решения
     loaded = load_merge(storage, FIC, CH)
     assert loaded is not None and loaded != "outdated"

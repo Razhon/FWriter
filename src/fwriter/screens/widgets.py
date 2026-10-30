@@ -3,6 +3,7 @@ from typing import ClassVar
 
 from textual import events
 from textual.binding import Binding, BindingType
+from textual.content import Content
 from textual.message import Message
 from textual.widgets import Label
 
@@ -42,7 +43,7 @@ class ClickableLabel(Label, can_focus=True):
 
     # markup выключен по умолчанию, в отличие от Label: названия глав приходят с сайта
     def __init__(
-        self, label: str, classes: str | None = None, markup: bool = False
+        self, label: str | Content, classes: str | None = None, markup: bool = False
     ) -> None:
         super().__init__(label, classes=classes, markup=markup)
 

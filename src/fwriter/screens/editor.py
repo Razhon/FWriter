@@ -6,7 +6,7 @@ from textual.binding import Binding, BindingType
 from textual.widgets import TextArea
 from textual.widgets.text_area import Document
 
-from ..core.markup import TAGS, apply, tag_list, wrap
+from ..core.markup import TAGS, Edit, apply, tag_list, wrap
 
 
 class ChapterEditor(TextArea):
@@ -49,8 +49,17 @@ class ChapterEditor(TextArea):
             edits = wrap(self.text, (a, b), tag)
         if not edits:
             return
-        # одной заменой: каждая вставка длиннее символа - отдельный шаг Ctrl+Z
-        lo, hi = edits[0][0], edits[-1][1]
+        end = self.apply_edits(edits)
+        # пара без выделения - курсор между тегами, иначе после вставленного
+        at = a + len(tag) + 2 if a == b and tag != "tab" else end
+        self.move_cursor(doc.get_location_from_index(at))
+
+    def apply_edits(self, edits: list[Edit]) -> int:
+        """Правки одной заменой - один шаг Ctrl+Z; возвращает конец вставленного."""
+        doc = self.document
+        assert isinstance(doc, Document)
+        # каждая вставка длиннее символа - отдельный шаг Ctrl+Z
+        lo, hi = min(e[0] for e in edits), max(e[1] for e in edits)
         part = apply(self.text[lo:hi], [(s - lo, e - lo, r) for s, e, r in edits])
         self.replace(
             part,
@@ -58,9 +67,7 @@ class ChapterEditor(TextArea):
             doc.get_location_from_index(hi),
             maintain_selection_offset=False,
         )
-        # пара без выделения - курсор между тегами, иначе после вставленного
-        at = a + len(tag) + 2 if a == b and tag != "tab" else lo + len(part)
-        self.move_cursor(doc.get_location_from_index(at))
+        return lo + len(part)
 
     def get_line(self, line_index: int) -> Text:
         line = super().get_line(line_index)

@@ -119,13 +119,18 @@ class ChapterButton(ClickableLabel):
         self.on_site = on_site
         self.trash = trash
         self.mark = mark
-        super().__init__(chapter.title + mark, classes="chapter_btn")
+        super().__init__(self.label(chapter.title), classes="chapter_btn")
+
+    def label(self, title: str, pending: bool = False) -> Content:
+        note = " (название не отправлено)" if pending else ""
+        if self.chapter.draft:
+            note += " (не опубликовано)"
+        # не $text-muted: в спане Content его "auto 60%" становится чистым белым
+        return Content.assemble(title + self.mark, (note, "$foreground-muted"))
 
     def show_title(self, shown: tuple[str, bool] | None) -> None:
         """shown - название из chapter.json и не отправлено ли оно; None - с сайта."""
-        title, pending = shown or (self.chapter.title, False)
-        note = " (название не отправлено)" if pending else ""
-        self.update(Content.assemble(title + self.mark, (note, "$text-muted")))
+        self.update(self.label(*(shown or (self.chapter.title, False))))
 
     def press(self) -> None:
         self.post_message(

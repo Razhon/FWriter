@@ -4,8 +4,7 @@ from dataclasses import replace
 
 import pytest
 from textual.app import App
-from textual.geometry import Region
-from textual.widgets import Collapsible, Input, Label, Log, TabbedContent
+from textual.widgets import Collapsible, Input, Label, Log, OptionList, TabbedContent
 from textual.widgets._collapsible import CollapsibleTitle
 from textual.widgets.text_area import Selection
 
@@ -19,11 +18,17 @@ from fwriter.core.api.errors import (
     SiteRejectedError,
     UserNotLoggedInError,
 )
-from fwriter.core.api.models import Chapter, Fic, SlimChapterInfo, UserInfo
+from fwriter.core.api.models import (
+    Chapter,
+    Fic,
+    RevisionInfo,
+    SlimChapterInfo,
+    UserInfo,
+)
 from fwriter.core.markup import MarkupError
 from fwriter.core.merge import Manual, merge3
 from fwriter.core.storage import ChapterStorage, MergeChoice, Version
-from fwriter.core.sync import Published, Synced
+from fwriter.core.sync import Published, Synced, SyncKind
 from fwriter.run import FWriterApp, setup_logging
 from fwriter.screens import (
     ConnectingScreen,
@@ -36,7 +41,7 @@ from fwriter.screens.api_errors import report_api_error
 from fwriter.screens.chapter import ChapterTab
 from fwriter.screens.diff import DiffScreen, aligned, diff_text, rev_line
 from fwriter.screens.editor import ChapterEditor
-from fwriter.screens.menu import MenuScreen
+from fwriter.screens.menu import HelpScreen, MenuScreen
 from fwriter.screens.merge import MergeScreen
 from fwriter.screens.start_page import (
     FIC_SECTIONS,
@@ -618,7 +623,7 @@ def test_click_while_loading_sends_one_request(tmp_path):
             # фокус в тексте, иначе TabbedContent вернётся к стартовой вкладке
             assert main.query_one(TabbedContent).active == tab.id
             assert main.focused is tab.editor
-            assert tab.title_input.disabled and tab.status.display
+            assert tab.title_input.disabled and tab.note == "Глава загружается…"
             # повторное нажатие переключает на ту же вкладку, закрыть её до конца нельзя
             main.open_chapter(FIC, FIC.chapters[0], "author")
             await close_tab(pilot, main)
@@ -631,7 +636,7 @@ def test_click_while_loading_sends_one_request(tmp_path):
             await pilot.pause()
             assert len(main.query(ChapterTab)) == 1
             assert not tab.editor.read_only and main.focused is tab.editor
-            assert not tab.title_input.disabled and not tab.status.display
+            assert not tab.title_input.disabled and tab.note is None
 
             # после закрытия глава открывается с диска, без второго запроса
             await pilot.press("!")
@@ -692,6 +697,52 @@ def test_open_chapter_syncs(tmp_path, monkeypatch, result, note: str):
     asyncio.run(run())
 
 
+def test_sync_cancels_fetch(tmp_path, monkeypatch):
+    # sync_chapter пишет chapter.json, прочитанный до сети: версия докачки затёрлась бы
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft("00000000", "00000000", "Текст.")
+    main = MainScreen(api_without_fics(), storage)
+    history = (
+        RevisionInfo(1, "/r/1", "00000001", "user-1", "user-1", "", "2026-10-26T00:33"),
+    )
+    calls: list[str] = []
+    alive: list[bool] = []  # шла ли докачка, когда началась синхронизация
+
+    def fetching() -> bool:
+        workers = main.app.workers
+        return any(
+            w.group == "fetch" and not w.is_cancelled and not w.is_finished
+            for w in workers
+        )
+
+    async def synced(*args) -> Synced:
+        alive.append(fetching())
+        return Synced("same", "Текст.", history=history)
+
+    async def fetch(*args) -> int:
+        calls.append("fetch")
+        if len(calls) == 2:
+            await asyncio.Event().wait()  # медленная сеть
+        return 0
+
+    monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
+    monkeypatch.setattr("fwriter.screens.chapter.fetch_revisions", fetch)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            tab = main.query_one(ChapterTab)
+            tab.fetch()
+            await pilot.pause()
+            assert fetching()
+            await tab.sync().wait()
+            await pilot.pause()
+            assert alive == [False, False] and len(calls) == 3
+
+    asyncio.run(run())
+
+
 def test_open_chapter_without_draft_closes_on_sync_error(tmp_path, monkeypatch):
     main = MainScreen(api_without_fics(), ChapterStorage(tmp_path))
 
@@ -731,42 +782,6 @@ def test_chapter_off_site_is_not_synced(tmp_path, monkeypatch):
             await pilot.pause()
             assert main.query(ChapterTab)
         assert not calls
-
-    asyncio.run(run())
-
-
-def test_editor_rewraps_on_screen_after_sync(tmp_path, monkeypatch):
-    # без строки "Проверяем сайт…" редактор шире: старый перенос не должен остаться на экране
-    # короткие слова: на 2 клетки шире - другой перенос почти в каждой строке
-    text = "\n\n".join(" ".join(["ой"] * 150) for _ in range(8))
-    storage = ChapterStorage(tmp_path)
-    storage.write_draft("00000000", "00000000", text)
-    main = MainScreen(api_without_fics(), storage)
-    response = asyncio.Event()
-
-    async def synced(*args) -> Synced:
-        await response.wait()
-        return Synced("same", text)
-
-    monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
-
-    async def run():
-        async with MainScreenApp(main).run_test() as pilot:
-            await pilot.app.workers.wait_for_complete()
-            main.open_chapter(FIC, FIC.chapters[0], "author")
-            # узкий редактор успевает нарисоваться
-            await pilot.pause(0.1)
-            response.set()
-            await pilot.app.workers.wait_for_complete()
-            await pilot.pause(0.1)
-            editor = main.query_one(ChapterTab).editor
-
-            def shown() -> list[str]:
-                return [s.text for s in editor.render_lines(Region(0, 0, *editor.size))]
-
-            before = shown()
-            editor.refresh()
-            assert shown() == before
 
     asyncio.run(run())
 
@@ -1735,7 +1750,7 @@ def test_renamed_chapter_marked_on_start_page(tmp_path):
             assert str(btn.render()) == "Глава! (название не отправлено)"
             # пометка серая, как крестик удаления
             [span] = btn.visual.spans  # type: ignore[union-attr]
-            assert str(span.style) == "$text-muted"
+            assert str(span.style) == "$foreground-muted"
 
     asyncio.run(run())
 
@@ -1872,6 +1887,31 @@ def test_merge_screen_writes_result(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_diff_screen_keeps_scroll_on_new_version(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    ids = ("00000000", "00000000")
+    for i in range(40):
+        storage.add_version(
+            *ids, f"{i}.", "Глава", "site", created=f"2026-02-{i % 28 + 1:02}T{i:02}"
+        )
+    meta = storage.read_chapter(*ids)
+    screen = DiffScreen(storage, *ids, meta, "Черновик.", True)
+
+    async def run():
+        async with App().run_test(size=(80, 30)) as pilot:
+            pilot.app.push_screen(screen)
+            await pilot.pause()
+            versions = screen.query_one("#diff_old", OptionList)
+            versions.scroll_to(y=20, animate=False, immediate=True)
+            await pilot.pause()
+            old = storage.add_version(*ids, "Старое.", "Глава", "site", at=0)
+            screen.add(old, 0)
+            await pilot.pause()
+            assert versions.scroll_y == 20
+
+    asyncio.run(run())
+
+
 def test_diff_screen_saves_and_restores(tmp_path, monkeypatch):
     storage = ChapterStorage(tmp_path)
     ids = ("00000000", "00000000")
@@ -1896,6 +1936,11 @@ def test_diff_screen_saves_and_restores(tmp_path, monkeypatch):
             assert isinstance(screen, DiffScreen)
             # по умолчанию base против черновика
             assert [b[1:3] for b in screen.blocks] == [(["Было."], ["Стало."])]
+
+            # докачанная старая правка встаёт в конец списка, выбор не меняется
+            old = storage.add_version(*ids, "Старое.", "Глава", "site", at=0)
+            main.query_one(ChapterTab).fetched(old, 0)
+            assert screen.versions[-1] == old and screen.old == base.file
 
             await pilot.press("s")
             await pilot.pause()
@@ -2078,6 +2123,15 @@ def test_diff_text_big_block():
     assert marked == ["новый", "\n", "вставка"]
 
 
+def test_diff_text_shows_changed_blanks():
+    # пробелы между словами остаются пробелами, изменённые невидимые - знаками
+    text = diff_text(["", "раз два"], ["  \t", "раз  два", "\r"])
+    assert text.plain == "··→\nраз··два\n␍"
+    # неразрывный пробел - не часть слова
+    assert diff_text(["раз два"], ["раз\xa0два"]).plain == "раз°два"
+    assert diff_text(["раз два"], ["раз три"]).plain == "раз три"
+
+
 def test_aligned_keeps_separators_in_columns():
     rows = [
         ("Черновик", "", "", ""),
@@ -2089,3 +2143,89 @@ def test_aligned_keeps_separators_in_columns():
     assert {line.index("2026") for line in lines[1:]} == {21}
     assert "·" not in lines[0]
     assert lines[1].startswith("черновик           · 2026")
+
+
+async def wait_menu(pilot) -> None:
+    # меню открывает воркер после подсчёта в потоке: wait_for_complete ждал бы выбора
+    for _ in range(100):
+        if isinstance(pilot.app.screen, MenuScreen):
+            return
+        await pilot.pause(0.02)
+    raise AssertionError("меню не открылось")
+
+
+def test_f9_merges_site_first(tmp_path, monkeypatch):
+    storage = ChapterStorage(tmp_path)
+    ids = ("00000000", "00000000")
+    base = storage.add_version(*ids, "Было.", "Глава", "site")
+    storage.write_chapter(*ids, replace(storage.read_chapter(*ids), base=base.file))
+    storage.write_draft(*ids, "Моё.")
+    site = storage.add_version(*ids, "Сайт.", "Глава", "site", site_num=2)
+    main = MainScreen(api_without_fics(), storage)
+    kinds: list[SyncKind] = ["same", "merge"]
+
+    async def synced(*args) -> Synced:
+        return Synced(kinds.pop(0), "Моё.", site)
+
+    monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            # правка сайта пересеклась с черновиком: вместо меню твиков - слияние
+            await pilot.press("f9")
+            await wait_merge_screen(pilot)
+            assert not kinds
+            await pilot.press("escape")
+            await pilot.app.workers.wait_for_complete()
+            assert not isinstance(pilot.app.screen, MenuScreen)
+
+    asyncio.run(run())
+
+
+def test_f9_tweaks_offline(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "раз -- два...\nтри")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            tab = main.query_one(ChapterTab)
+            editor = tab.editor
+            await pilot.press("f9")
+            await wait_menu(pilot)
+            menu = pilot.app.screen
+            assert isinstance(menu, MenuScreen)
+            options = menu.query_one(OptionList)
+            # кавычек нет - пункт серый
+            quotes = options.get_option("quotes")
+            assert quotes.disabled
+            assert str(options.get_option("dashes").prompt).endswith("· 1")
+            options.highlighted = options.get_option_index("dashes")
+            await pilot.press("enter")
+            await pilot.app.workers.wait_for_complete()
+            assert editor.text == "раз — два...\nтри"
+            # второй твик - та же серия, версия одна
+            await pilot.press("f9")
+            await wait_menu(pilot)
+            options = pilot.app.screen.query_one(OptionList)
+            options.highlighted = options.get_option_index("ellipsis")
+            await pilot.press("enter")
+            await pilot.app.workers.wait_for_complete()
+            assert editor.text == "раз — два…\nтри"
+            meta = storage.read_chapter(FIC.id, "00000000")
+            assert [v.comment for v in meta.versions] == ["до твика „Тире“"]
+            assert storage.read_version(FIC.id, "00000000", meta.versions[0].file) == (
+                "раз -- два...\nтри"
+            )
+            # каждый пункт - один шаг отмены
+            await pilot.press("ctrl+z")
+            assert editor.text == "раз — два...\nтри"
+            # F8 - справка
+            await pilot.press("f8")
+            assert isinstance(pilot.app.screen, HelpScreen)
+
+    asyncio.run(run())

@@ -50,6 +50,8 @@
 /* рамка по ширине текста, длинный абзац переносится */
 .diff-block ParagraphDiff {
     width: auto;
+    /* подпись "Стало" не прячется у короткого абзаца */
+    min-width: 9;
     max-width: 100%;
     padding: 0 1;
     border-title-style: bold;
