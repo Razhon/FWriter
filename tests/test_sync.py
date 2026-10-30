@@ -80,12 +80,19 @@ def test_first_open_downloads_and_sets_base(tmp_path):
     assert meta.base == v.file
     assert (v.source, v.author, v.site_num, v.site_rev) == ("site", "3001", 1, None)
 
-    # второй раз: новых версий нет, статус и адрес истории - снова с сайта
+    # второй раз: новых версий нет, статус и адрес истории - снова с сайта,
+    # а правку base по списку узнаёт без её страницы
     api.calls.clear()
     again = sync(api, storage)
-    assert (again.kind, again.status) == ("same", 1)
-    assert api.calls[1] == MINE
+    assert (again.kind, again.text, again.status) == ("same", "Текст.", 1)
+    assert api.calls == ["chapter", MINE]
     assert len(storage.read_chapter(FIC, CH).versions) == 1
+
+    # без черновика текст берётся со страницы правки
+    (tmp_path / "fics" / FIC / CH / "draft.txt").unlink()
+    api.calls.clear()
+    assert sync(api, storage).text == "Текст."
+    assert api.calls[-1] == info(1).url
 
 
 def test_fast_forward(tmp_path):
@@ -135,10 +142,10 @@ def test_sync_keeps_version_written_during_request(tmp_path):
     sync(FakeAPI(rev("Старое.")), storage)
 
     class FetchingAPI(FakeAPI):
-        async def get_revision(self, url: str) -> Revision:
+        async def get_chapter_revisions(self, history_url: str) -> list[RevisionInfo]:
             # докачка успела записать правку, пока синхронизация ждала сайт
             storage.add_version(FIC, CH, "Докачано.", "Глава", "site", site_rev="9001")
-            return await super().get_revision(url)
+            return await super().get_chapter_revisions(history_url)
 
     sync(FetchingAPI(rev("Старое.")), storage)
     assert "9001" in [v.site_rev for v in storage.read_chapter(FIC, CH).versions]
@@ -174,6 +181,7 @@ def test_initial_revision_matched_by_text(tmp_path):
 
     # тот же автор, другой текст - уже другая ревизия
     api.last = replace(api.last, content="Другое.")
+    api.revs = [info(2), info(1, "9001")]
     assert sync(api, storage).kind == "ff"
 
 
@@ -712,7 +720,8 @@ def test_postponed_merge_review_takes_new_edits(tmp_path):
     storage = ChapterStorage(tmp_path)
     sync(FakeAPI(rev("Было.\n\nОбщее.")), storage)
     storage.write_draft(FIC, CH, "Моё.\n\nОбщее.")
-    synced = sync(FakeAPI(rev("Сайт.\n\nОбщее!", "2026-10-27T10:00:00")), storage)
+    site = FakeAPI(rev("Сайт.\n\nОбщее!", "2026-10-27T10:00:00"), [info(2)])
+    synced = sync(site, storage)
     assert synced.site is not None
     merge, parts, _ = start_merge(storage, FIC, CH, "Глава", synced.site)
     assert postpone_merge(storage, FIC, CH, "Глава", merge, parts, {0: "site"})
@@ -740,12 +749,13 @@ def test_load_merge_outdated_after_fast_forward(tmp_path):
     storage = ChapterStorage(tmp_path)
     sync(FakeAPI(rev("Было.\n\nОбщее.")), storage)
     storage.write_draft(FIC, CH, "Моё.\n\nОбщее.")
-    synced = sync(FakeAPI(rev("Сайт.\n\nОбщее!", "2026-10-27T10:00:00")), storage)
+    site = FakeAPI(rev("Сайт.\n\nОбщее!", "2026-10-27T10:00:00"), [info(2)])
+    synced = sync(site, storage)
     assert synced.site is not None
     merge, parts, _ = start_merge(storage, FIC, CH, "Глава", synced.site)
     finish_merge(storage, FIC, CH, "Глава", merge, parts, {0: "site"})
     # черновик равен base: новая правка сайта - fast-forward
-    ff = sync(FakeAPI(rev("Сайт.\n\nЕщё.", "2026-10-28T10:00:00")), storage)
+    ff = sync(FakeAPI(rev("Сайт.\n\nЕщё.", "2026-10-28T10:00:00"), [info(3)]), storage)
     assert ff.kind == "ff"
     assert load_merge(storage, FIC, CH) == "outdated"
 

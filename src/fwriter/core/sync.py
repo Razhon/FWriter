@@ -43,6 +43,27 @@ def _same(
     return v.created == rev.created
 
 
+def _unchanged(
+    storage: ChapterStorage,
+    fic_id: str,
+    chapter_id: str,
+    title: str,
+    last: RevisionInfo,
+) -> bool:
+    """base - последняя правка сайта по ключу из списка, и черновик есть."""
+    # shortcut: правка того же автора в ту же минуту с тем же номером после удаления
+    # старых не видна до следующей; F5 её не затрёт - save_chapter сверяет base с сайтом
+    meta = storage.load_chapter(fic_id, chapter_id, title)
+    base = next((v for v in meta.versions if v.file == meta.base), None)
+    return (
+        base is not None
+        and base.site_num == last.num
+        and base.author == last.author
+        and (base.created or "")[:16] == last.created
+        and storage.read_draft(fic_id, chapter_id) is not None
+    )
+
+
 def _renumber(
     v: Version, nums: dict[str, int], known: Version | None, last: RevisionInfo
 ) -> Version:
@@ -89,7 +110,12 @@ async def sync_chapter(
     else:
         history_url = history_url or api.participated_history_url(fic_id, chapter_id)
     revs = await api.get_chapter_revisions(history_url)
-    last = await api.get_revision(revs[0].url)
+    # полный текст главы качаем, только если сайт мог поменяться
+    last = (
+        None
+        if _unchanged(storage, fic_id, chapter_id, title, revs[0])
+        else await api.get_revision(revs[0].url)
+    )
 
     # после сети: между чтением и записью нет await, докачка не затрётся
     meta = storage.load_chapter(fic_id, chapter_id, title)
@@ -97,14 +123,17 @@ async def sync_chapter(
     meta.title, conflict = _merge_title(meta, site_title)
     meta.site_title = site_title
 
-    known = next(
-        (
-            v
-            for v in meta.versions
-            if v.source != "manual" and _same(storage, fic_id, chapter_id, v, last)
-        ),
-        None,
-    )
+    if last is None:
+        known = next(v for v in meta.versions if v.file == meta.base)
+    else:
+        known = next(
+            (
+                v
+                for v in meta.versions
+                if v.source != "manual" and _same(storage, fic_id, chapter_id, v, last)
+            ),
+            None,
+        )
     # номера сдвигаются, когда сайт удаляет старые правки
     nums = {r.rev_id: r.num for r in revs if r.rev_id}
     meta.versions = [_renumber(v, nums, known, revs[0]) for v in meta.versions]
@@ -113,10 +142,13 @@ async def sync_chapter(
     base = next((v for v in meta.versions if v.file == meta.base), None)
     if known is not None and base is not None and base.file == known.file:
         draft = storage.read_draft(fic_id, chapter_id)
-        text = last.content if draft is None else draft
+        if draft is None:
+            assert last is not None  # без черновика быстрого пути нет
+            draft = last.content
         return Synced(
-            "same", text, status=status, title_conflict=conflict, history=tuple(revs)
+            "same", draft, status=status, title_conflict=conflict, history=tuple(revs)
         )
+    assert last is not None  # быстрый путь вышел выше: known там - base
 
     site = known or storage.add_version(
         fic_id,
