@@ -166,6 +166,40 @@ ChapterTab {
     background: $error-muted;
 }
 
+/* WYSIWYG на всю ширину вкладки, отступы - как у рамки редактора */
+VisualEditor {
+    width: 1fr;
+    padding: 1 2;
+    overflow-y: scroll;
+    border: tall $border-blurred;
+
+    &:focus {
+        border: tall $border;
+    }
+
+    & > .visual-editor--hidden, & > .visual-editor--footnote {
+        color: $text-muted;
+    }
+
+    & > .visual-editor--cursor {
+        color: $background;
+        background: $foreground;
+    }
+
+    & > .visual-editor--selection {
+        background: $primary 40%;
+    }
+
+    /* тире - как в редакторе разметки */
+    & > .visual-editor--emdash {
+        background: $primary-muted;
+    }
+
+    & > .visual-editor--endash {
+        background: $error;
+    }
+}
+
 ReaderPanel {
     width: 1fr;
     /* сверху и снизу - как рамка редактора: строки вровень */

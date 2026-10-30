@@ -1,6 +1,7 @@
 import bisect
 import itertools
 import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -160,6 +161,72 @@ class _Tags(_Parser):
         start = self.at()
         if tag in TAGS and tag != "tab" and self.text.startswith(f"</{tag}>", start):
             self.tags.append((start, start + len(tag) + 3, tag, True))
+
+
+class _AnyTags(_Parser):
+    """все теги, и неизвестные: <u>, <B>, </b > - для запрета ввода тегов"""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text, convert_charrefs=False)
+        self.tags: list[str] = []
+
+    def set_cdata_mode(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    def handle_starttag(self, tag: str, attrs: object) -> None:
+        self.tags.append(self.get_starttag_text() or "")
+
+    handle_startendtag = handle_starttag
+
+    def handle_endtag(self, tag: str) -> None:
+        self.tags.append(f"</{tag}>")
+
+
+def _all_tags(text: str) -> Counter[str]:
+    tags = _AnyTags(text)
+    tags.feed(text)
+    tags.close()
+    return Counter(tags.tags)
+
+
+def adds_tag(old: str, new: str) -> bool:
+    """в new есть тег, которого не было в old"""
+    return bool(_all_tags(new) - _all_tags(old))
+
+
+def prev_char(row: str, col: int) -> tuple[int, int] | None:
+    """что стирает Backspace в строке документа: символ перед col мимо тегов,
+    <tab> - целиком; None - до начала строки только теги"""
+    ends = {end: (start, name) for start, end, name, _ in tag_list(row)}
+    while col > 0:
+        if col not in ends:
+            return col - 1, col
+        start, name = ends[col]
+        if name == "tab":
+            return start, col
+        col = start
+    return None
+
+
+def next_char(row: str, col: int) -> tuple[int, int] | None:
+    """что стирает Del: символ после col мимо тегов, <tab> - целиком"""
+    starts = {start: (end, name) for start, end, name, _ in tag_list(row)}
+    while col < len(row):
+        if col not in starts:
+            return col, col + 1
+        end, name = starts[col]
+        if name == "tab":
+            return col, end
+        col = end
+    return None
+
+
+def strip_text(text: str) -> str:
+    """теги из text без <tab>: удаление выделения в WYSIWYG не ломает разметку,
+    а отступ - видимый текст и уходит вместе с выделением"""
+    return "".join(
+        text[start:end] for start, end, name, _ in tag_list(text) if name != "tab"
+    )
 
 
 def _drop_last(items: list[str], name: str) -> None:
@@ -389,6 +456,38 @@ class Reader:
         end = self.chunks[c + 1][1] if c + 1 < len(self.chunks) else len(self.lines)
         n = bisect.bisect_right(self.lines, raw, start, end, key=lambda x: x.start)
         return max(0, min(n - 1, len(self.lines) - 1))
+
+    def _first_row(self, n: int) -> int:
+        """первая строка документа у куска строки читателя n"""
+        c = bisect.bisect_right(self.chunks, n, key=lambda x: x[1]) - 1
+        return self.chunks[c][0]
+
+    def locate(self, rows: list[str], row: int, col: int) -> tuple[int, int]:
+        """позиция документа -> строка читателя и столбец в её тексте"""
+        n = self.find(rows, row, col)
+        first = self._first_row(n)
+        raw = sum(len(r) + 1 for r in rows[first:row]) + col
+        return n, to_screen([self.lines[n]], raw)[1]
+
+    def location(self, rows: list[str], n: int, col: int) -> tuple[int, int]:
+        """строка читателя и столбец -> позиция документа; на границе отрезков -
+        конец левого: набранное после "ab" перед <b> останется без оформления"""
+        line = self.lines[n]
+        raw, at = line.end, 0
+        for run in line.runs:
+            size = len(run.text)
+            if not run.virtual and at < col <= at + size:
+                raw = run.raw + col - at
+                break
+            if col < at + size:
+                raw = run.raw if run.virtual else run.raw + col - at
+                break
+            at += size
+        row = self._first_row(n)
+        while raw > len(rows[row]):
+            raw -= len(rows[row]) + 1
+            row += 1
+        return row, raw
 
 
 def count(text: str) -> tuple[int, int]:

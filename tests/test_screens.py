@@ -4,6 +4,7 @@ import logging
 from dataclasses import replace
 
 import pytest
+from rich.style import Style
 from textual.app import App
 from textual.geometry import Offset
 from textual.widgets import Collapsible, Input, Label, Log, OptionList, TabbedContent
@@ -27,7 +28,7 @@ from fwriter.core.api.models import (
     SlimChapterInfo,
     UserInfo,
 )
-from fwriter.core.markup import MarkupError, layout
+from fwriter.core.markup import MarkupError, Reader
 from fwriter.core.merge import Manual, merge3
 from fwriter.core.storage import ChapterStorage, MergeChoice, Version
 from fwriter.core.sync import Published, Synced, SyncKind
@@ -42,7 +43,8 @@ from fwriter.screens import (
 from fwriter.screens.api_errors import report_api_error
 from fwriter.screens.chapter import ChapterTab
 from fwriter.screens.diff import DiffScreen, aligned, diff_text, rev_line
-from fwriter.screens.editor import ChapterEditor, breaks
+from fwriter.screens.editor import ChapterEditor
+from fwriter.screens.layout import ScreenLines, breaks
 from fwriter.screens.menu import HelpScreen, MenuScreen
 from fwriter.screens.merge import MergeScreen
 from fwriter.screens.start_page import (
@@ -52,6 +54,7 @@ from fwriter.screens.start_page import (
     NewChapterButton,
     TrashButton,
 )
+from fwriter.screens.visual import VisualEditor
 from fwriter.screens.widgets import ClickableLabel
 from fwriter.secrets import SecretStorage
 
@@ -2308,13 +2311,6 @@ def test_reader_panel_and_markup_error(tmp_path):
             assert panel.render_line(0).text.rstrip() == "раз"
             assert panel.render_line(1).text.rstrip() == "два"
             assert panel.current == 0
-            # центр по видимому тексту экранной строки, а не по отрезкам со стилем
-            line = layout("<center>раз два <b>длинноеслово</b></center>")[0]
-            assert [s.text for s in panel.wrap(line, 10)] == [
-                " раз два",
-                "длинноесло",
-                "    во",
-            ]
             editor.move_cursor((1, 0))
             await pilot.pause()
             assert panel.current == 1
@@ -2332,6 +2328,25 @@ def test_reader_panel_and_markup_error(tmp_path):
             assert not tab.markup_error.display
 
     asyncio.run(run())
+
+
+def test_screen_lines():
+    reader = Reader()
+    reader.update(["<center>раз два <b>длинноеслово</b></center>", "а  б"])
+    lines = ScreenLines(reader, hidden=None)
+    lines.relayout(10)
+    # центр по видимому тексту экранной строки, а не по отрезкам со стилем;
+    # после блока - пустая строка, как у читателя
+    shown = [lines.render(y, lambda run: Style()).plain for y in range(5)]
+    assert shown == [" раз два", "длинноесло", "    во", "", "а б"]
+    # со скрытыми пробелами столбцы - столбцы Reader: клетка и обратно
+    visual = ScreenLines(reader, hidden="·")
+    visual.relayout(10)
+    assert visual.render(4, lambda run: Style()).plain == "а ·б"
+    for n, line in enumerate(reader.lines):
+        size = sum(len(run.text) for run in line.runs)
+        for col in range(size + 1):
+            assert visual.col(*visual.cell(n, col)) == (n, col)
 
 
 @pytest.mark.parametrize(
@@ -2366,7 +2381,142 @@ def test_reader_panel_follows_scroll(tmp_path):
                 editor.scroll_to(y=y, animate=False)
                 await pilot.pause()
                 row = editor.wrapped_document.offset_to_location(Offset(0, y))[0]
-                n = bisect.bisect_right(panel.tops, int(panel.scroll_y)) - 1
+                n = (
+                    bisect.bisect_right(panel.screen_lines.tops, int(panel.scroll_y))
+                    - 1
+                )
                 assert panel.reader.find(editor.document.lines, row, 0) == n
+
+    asyncio.run(run())
+
+
+def test_visual_editor(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "<b>раз</b>  — два\nтри")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            tab = main.query_one(ChapterTab)
+            editor, visual = tab.editor, tab.visual
+            await pilot.press("f7")
+            await pilot.pause()
+            assert visual.display and visual.has_focus and not editor.display
+            # без тегов, скрытый пробел - точкой
+            assert visual.render_line(0).text.rstrip() == "раз ·— два"
+            # курсор после "раз" - до </b>: набранное жирное
+            await pilot.press("right", "right", "right", "x")
+            assert editor.document.lines[0] == "<b>разx</b>  — два"
+            await pilot.press("end", "!")
+            assert editor.document.lines[0] == "<b>разx</b>  — два!"
+            # Backspace в начале строки соединяет абзацы, теги не трогает
+            await pilot.press("down", "home", "backspace")
+            assert editor.text == "<b>разx</b>  — два!три"
+            # тег не набирается
+            await pilot.press("<", "u", ">")
+            assert editor.text == "<b>разx</b>  — два!<uтри"
+            # удаление выделения оставляет теги, история Ctrl+Z общая с разметкой
+            editor.selection = Selection((0, 0), (0, 13))
+            await pilot.press("backspace")
+            assert editor.text == "<b></b>— два!<uтри"
+            await pilot.press("ctrl+z")
+            assert editor.text == "<b>разx</b>  — два!<uтри"
+            # клик - курсор в эту клетку, Shift+→ - выделение; рамка и отступ 1 + 2
+            await pilot.click(VisualEditor, offset=(3 + 1, 2))
+            assert editor.selection == Selection.cursor((0, 4))
+            await pilot.press("shift+right")
+            assert editor.selection == Selection((0, 4), (0, 5))
+            # F7 обратно: курсор на том же месте текста
+            loc = editor.selection
+            await pilot.press("f7")
+            assert editor.display and editor.has_focus and not visual.display
+            assert editor.selection == loc
+            # с ошибкой разметки WYSIWYG не включается
+            editor.insert("<i>")
+            await pilot.press("f7")
+            assert editor.display and not visual.display
+
+    asyncio.run(run())
+
+
+def test_page_keys_move_by_paragraph(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "раз\n\n<b>два</b>\nтри")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            editor = main.query_one(ChapterTab).editor
+            editor.focus()
+            # обе раскладки: разметка, потом WYSIWYG - пустая строка пропускается,
+            # PgDn с последнего абзаца - в конец, PgUp из середины - в начало абзаца
+            for mode in ("raw", "wysiwyg"):
+                if mode == "wysiwyg":
+                    await pilot.press("f7")
+                editor.selection = Selection.cursor((0, 1))
+                ends = []
+                for key in ("pagedown", "pagedown", "pagedown", "pageup", "pageup"):
+                    await pilot.press(key)
+                    ends.append(editor.selection.end)
+                first = (2, 0) if mode == "raw" else (2, 3)
+                assert ends == [first, (3, 0), (3, 3), (3, 0), first], mode
+                await pilot.press("pageup", "shift+pagedown")
+                assert editor.selection == Selection((0, 0), first), mode
+
+    asyncio.run(run())
+
+
+def test_visual_arrows_pass_tab(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "<tab>аб")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            editor = main.query_one(ChapterTab).editor
+            editor.focus()
+            await pilot.press("f7")
+            # отступ <tab> - четыре клетки, но одна позиция текста
+            await pilot.press("right")
+            assert editor.selection.end == (0, 5)
+            await pilot.press("right", "left", "left")
+            assert editor.selection.end == (0, 0)
+            # Backspace после отступа стирает <tab> целиком
+            await pilot.press("right", "backspace")
+            assert editor.text == "аб"
+
+    asyncio.run(run())
+
+
+def test_undo_off_while_read_only(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "раз")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            editor = main.query_one(ChapterTab).editor
+            editor.focus()
+            await pilot.press("end", "x")
+            # во время обмена с сайтом откат не трогает текст ни в одном режиме
+            editor.read_only = True
+            for mode in ("raw", "wysiwyg"):
+                if mode == "wysiwyg":
+                    editor.read_only = False
+                    await pilot.press("f7")
+                    editor.read_only = True
+                await pilot.press("ctrl+z")
+                assert editor.text == "разx", mode
+            editor.read_only = False
+            await pilot.press("ctrl+z")
+            assert editor.text == "раз"
 
     asyncio.run(run())

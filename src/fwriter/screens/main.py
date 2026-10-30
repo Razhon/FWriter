@@ -28,7 +28,7 @@ class MainScreen(Screen):
         Binding("f1", "start_page", "Начало работы"),
     ]
     # footer иначе идёт по цепочке от фокуса: ^w от TextArea встаёт первым
-    FOOTER_ORDER = ("f1", "f2", "f3", "f4", "f5", "f6", "f8", "f9")
+    FOOTER_ORDER = ("f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9")
 
     @property
     def active_bindings(self) -> dict[str, ActiveBinding]:
@@ -142,7 +142,7 @@ class MainScreen(Screen):
         tabbed.active = tab.id or ""
         # фокус с нажатой главы на скрытой стартовой вкладке вернул бы её обратно;
         # сразу, а не focus(): иначе Hide отдаёт его соседней кнопке
-        self.set_focus(tab.editor)
+        self.set_focus(tab.active)
 
     async def on_new_chapter_button_create(
         self, message: NewChapterButton.Create

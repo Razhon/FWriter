@@ -9,6 +9,7 @@ from fwriter.core.markup import (
     TAGS,
     MarkupError,
     Reader,
+    adds_tag,
     apply,
     check,
     count,
@@ -16,11 +17,14 @@ from fwriter.core.markup import (
     ellipsis,
     fix_tags,
     layout,
+    next_char,
     para_style,
     paras_touched,
+    prev_char,
     quotes,
     restyle,
     spaces,
+    strip_text,
     to_raw,
     to_screen,
     tweak_kind,
@@ -200,6 +204,51 @@ def test_reader_matches_layout():
             row = bisect.bisect_right(starts, raw) - 1
             n = reader.find(rows, row, raw - starts[row])
             assert got[n][1] <= raw and (n + 1 == len(got) or raw < got[n + 1][1])
+        # позиция -> клетка -> позиция -> та же клетка (внутри <tab> позиций нет)
+        for row, line in enumerate(rows):
+            for col in range(len(line) + 1):
+                cell = reader.locate(rows, row, col)
+                loc = reader.location(rows, *cell)
+                assert reader.locate(rows, *loc) == cell, text
+
+
+@pytest.mark.parametrize(
+    ("row", "col", "back", "forward"),
+    [
+        ("ab", 1, (0, 1), (1, 2)),
+        # мимо тегов, <tab> - целиком
+        ("a<b>c", 4, (0, 1), (4, 5)),
+        ("a<b><tab>", 9, (4, 9), None),
+        ("<tab>x", 0, None, (0, 5)),
+        # до края строки только теги
+        ("<b>x", 3, None, (3, 4)),
+        ("x</b>", 1, (0, 1), None),
+    ],
+)
+def test_prev_next_char(row, col, back, forward):
+    assert prev_char(row, col) == back
+    assert next_char(row, col) == forward
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "added"),
+    [
+        ("a", "a<u>", True),
+        ("a", "a</b>", True),
+        ("a", "a<B>", True),
+        ("<b>a</b>", "<b>ab</b>", False),
+        ("a <", "a <3", False),
+        ("a", "a -> b", False),
+        # удаление тоже может собрать тег
+        ("<x b>", "<b>", True),
+    ],
+)
+def test_adds_tag(old, new, added):
+    assert adds_tag(old, new) is added
+
+
+def test_strip_text():
+    assert strip_text("a<b>bc</b>d\n<tab>e") == "<b></b>"
 
 
 @pytest.mark.parametrize("text", MAP_TEXTS)

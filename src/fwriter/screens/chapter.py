@@ -29,6 +29,7 @@ from ..core.history import (
 from ..core.markup import (
     Edit,
     MarkupError,
+    Reader,
     Tweak,
     check,
     count,
@@ -49,6 +50,7 @@ from .diff import DiffScreen, rev_line, version_line
 from .editor import ChapterEditor, ReaderPanel
 from .menu import HelpScreen, MenuScreen
 from .merge import MergeScreen
+from .visual import VisualEditor
 from .widgets import CONFIRM_DELAY
 
 log = logging.getLogger(__name__)
@@ -72,6 +74,7 @@ class ChapterTab(TabPane):
         Binding("f4", "review", "Слияние"),
         Binding("f5", "publish", "Отправить"),
         Binding("f6", "status", "Статус"),
+        Binding("f7", "mode", "Режим"),
         Binding("f8", "help", "Оформление"),
         Binding("f9", "tweaks", "Твики"),
         Binding("escape", "hide_title", show=False),
@@ -163,8 +166,12 @@ class ChapterTab(TabPane):
         self.title_input = Input(title)
         self.title_input.display = False
         self.title_before = title
+        # текст, курсор и история Ctrl+Z - у editor, оба вида рисуют один Reader
+        self.reader = Reader()
         self.editor = ChapterEditor()
-        self.panel = ReaderPanel()
+        self.panel = ReaderPanel(self.reader)
+        self.visual = VisualEditor(self.editor, self.reader)
+        self.visual.display = False
         self.markup_error = Static(id="markup_error")
         self.markup_error.display = False
         # что сейчас идёт, первым в строке о главе: плашка над текстом сдвигала бы его;
@@ -304,6 +311,7 @@ class ChapterTab(TabPane):
         # позже, чем закрытие вкладки при ошибке синхронизации
         yield self.editor
         yield self.panel
+        yield self.visual
         yield self.markup_error
 
     def on_mount(self) -> None:
@@ -349,12 +357,37 @@ class ChapterTab(TabPane):
         self.title_input.display = True
         self.title_input.focus()
 
+    @property
+    def active(self) -> ChapterEditor | VisualEditor:
+        """редактор текущего режима"""
+        return self.visual if self.visual.display else self.editor
+
+    def action_mode(self) -> None:
+        """F7: WYSIWYG или разметка с панелью читателя, курсор на том же месте"""
+        wysiwyg = not self.visual.display
+        if wysiwyg and (error := check(self.editor.text)) is not None:
+            self.editor.cursor_location = (error.line, error.col)
+            self.notify(
+                f"WYSIWYG недоступен: ошибка разметки, строка {error.line + 1}: "
+                f"{error.message}",
+                severity="error",
+            )
+            return
+        self.editor.display = self.panel.display = not wysiwyg
+        self.visual.display = wysiwyg
+        self.active.focus()
+        if wysiwyg:
+            # ширина у показанного виджета будет после отрисовки
+            self.visual.call_after_refresh(self.visual.shown)
+        else:
+            self.editor.scroll_cursor_visible()
+
     def action_hide_title(self) -> None:
-        self.editor.focus()
+        self.active.focus()
 
     @on(Input.Submitted)
     def title_submitted(self) -> None:
-        self.editor.focus()
+        self.active.focus()
 
     @on(Input.Blurred)
     def hide_title(self) -> None:
@@ -373,7 +406,9 @@ class ChapterTab(TabPane):
 
     @on(TextArea.Changed)
     def reread(self) -> None:
-        self.panel.update(self.editor.document.lines)
+        self.reader.update(self.editor.document.lines)
+        self.panel.relayout()
+        self.visual.relayout()
         self.follow_cursor()
         self.check_markup()
 
