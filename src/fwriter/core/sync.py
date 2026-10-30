@@ -385,6 +385,7 @@ async def _create_chapter(
     api: FicbookAPI, storage: ChapterStorage, fic_id: str, chapter_id: str
 ) -> Published:
     text = storage.read_draft(fic_id, chapter_id) or ""
+    # главы на сайте ещё нет: синхронизации не было, поля - как у пустой главы
     first = Synced("same", text)
     error = check(text)
     if error is not None:

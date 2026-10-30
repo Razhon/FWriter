@@ -48,6 +48,7 @@ def _snapshot(
 ) -> Version:
     """Черновик версией; если он равен последней версии - она."""
     draft = storage.read_draft(fic_id, chapter_id) or ""
+    # докачка в конец не вставляет (fetch_revisions): versions[-1] - последняя записанная
     last = meta.versions[-1] if meta.versions else None
     if last and storage.read_version(fic_id, chapter_id, last.file) == draft:
         return last
@@ -141,6 +142,7 @@ def finish_merge(
 ) -> str:
     """Шаг 4.4: результат в черновик, base - ревизия сайта, решения - в last_merge."""
     text = render(parts, choices)
+    meta = storage.load_chapter(fic_id, chapter_id, title)
     draft = storage.read_draft(fic_id, chapter_id)
     # при F4 в черновике бывают правки после слияния
     if (
@@ -148,9 +150,9 @@ def finish_merge(
         and draft != text
         and draft != storage.read_version(fic_id, chapter_id, merge.mine)
     ):
-        storage.add_version(fic_id, chapter_id, draft, title, "manual")
+        storage.add_version(fic_id, chapter_id, draft, meta.title, "manual")
+        meta = storage.load_chapter(fic_id, chapter_id, title)
     storage.write_draft(fic_id, chapter_id, text)
-    meta = storage.load_chapter(fic_id, chapter_id, title)
     merge = replace(merge, choices=_saved(parts, choices))
     storage.write_chapter(
         fic_id, chapter_id, replace(meta, base=merge.site, last_merge=merge)
