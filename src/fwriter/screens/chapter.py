@@ -9,9 +9,10 @@ from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.content import Content
+from textual.geometry import Offset
 from textual.message import Message
 from textual.timer import Timer
-from textual.widgets import Input, TabbedContent, TabPane, TextArea
+from textual.widgets import Input, Static, TabbedContent, TabPane, TextArea
 from textual.widgets.text_area import Document
 
 from ..core.api.client import FicbookAPI
@@ -25,7 +26,16 @@ from ..core.history import (
     restore_version,
     start_merge,
 )
-from ..core.markup import Edit, Tweak, check, count, para_style, paras_touched, tweak
+from ..core.markup import (
+    Edit,
+    MarkupError,
+    Tweak,
+    check,
+    count,
+    para_style,
+    paras_touched,
+    tweak,
+)
 from ..core.merge import Choice
 from ..core.storage import ChapterMeta, ChapterStorage, LastMerge, Version
 from ..core.sync import (
@@ -36,7 +46,7 @@ from ..core.sync import (
 )
 from .api_errors import report_api_error, report_disk_error
 from .diff import DiffScreen, rev_line, version_line
-from .editor import ChapterEditor
+from .editor import ChapterEditor, ReaderPanel
 from .menu import HelpScreen, MenuScreen
 from .merge import MergeScreen
 from .widgets import CONFIRM_DELAY
@@ -54,6 +64,7 @@ class ChapterTab(TabPane):
     """
 
     AUTOSAVE_DELAY = 2.0
+    CHECK_DELAY = 0.3
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("f2", "rename", "Переименовать"),
@@ -153,6 +164,9 @@ class ChapterTab(TabPane):
         self.title_input.display = False
         self.title_before = title
         self.editor = ChapterEditor()
+        self.panel = ReaderPanel()
+        self.markup_error = Static(id="markup_error")
+        self.markup_error.display = False
         # что сейчас идёт, первым в строке о главе: плашка над текстом сдвигала бы его;
         # не editor.loading: он снимает фокус, и TabbedContent уходит на стартовую вкладку
         self.note: str | None = None
@@ -286,9 +300,15 @@ class ChapterTab(TabPane):
 
     def compose(self) -> ComposeResult:
         yield self.title_input
+        # без контейнеров: фокус редактора дошёл бы до TabbedContent
+        # позже, чем закрытие вкладки при ошибке синхронизации
         yield self.editor
+        yield self.panel
+        yield self.markup_error
 
     def on_mount(self) -> None:
+        self.reread()
+        self.watch(self.editor, "scroll_y", self.follow_scroll, init=False)
         if self.syncing:
             self.sync()
         else:
@@ -350,6 +370,36 @@ class ChapterTab(TabPane):
             self.save_timer.stop()
         self.save_timer = self.set_timer(self.AUTOSAVE_DELAY, self.save)
         self.post_message(self.InfoChanged(self))
+
+    @on(TextArea.Changed)
+    def reread(self) -> None:
+        self.panel.update(self.editor.document.lines)
+        self.follow_cursor()
+        self.check_markup()
+
+    @on(TextArea.SelectionChanged)
+    def follow_cursor(self) -> None:
+        self.panel.show(self.editor.document.lines, *self.editor.cursor_location)
+
+    def follow_scroll(self) -> None:
+        # по абзацам: строки читателя и редактора разной высоты, пустые строки скрыты
+        wrapped = self.editor.wrapped_document
+        top = int(self.editor.scroll_y)
+        row = wrapped.offset_to_location(Offset(0, top))[0]
+        shift = top - wrapped.location_to_offset((row, 0)).y
+        self.panel.align(self.editor.document.lines, row, shift)
+
+    @work(exclusive=True, group="check")
+    async def check_markup(self) -> None:
+        # exclusive отменяет прежнюю проверку: проверяем после паузы в наборе
+        await asyncio.sleep(self.CHECK_DELAY)
+        self.show_error(await asyncio.to_thread(check, self.editor.text))
+
+    def show_error(self, error: MarkupError | None) -> None:
+        self.editor.mark_error(error and error.line)
+        self.markup_error.display = error is not None
+        if error:
+            self.markup_error.update(f"Строка {error.line + 1}: {error.message}")
 
     @on(Input.Changed)
     def rename_tab(self, event: Input.Changed) -> None:

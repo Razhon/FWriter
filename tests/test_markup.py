@@ -1,9 +1,14 @@
+import bisect
+import dataclasses
+import random
+
 import pytest
 
 from fwriter.core.markup import (
     TAB_WIDTH,
     TAGS,
     MarkupError,
+    Reader,
     apply,
     check,
     count,
@@ -159,6 +164,42 @@ MAP_TEXTS = [
     "<tab><b>x\ny</b> <footnote>n <i>m</i></footnote>.",
     "</b>x<u>y</u>\n\n<right>r</right>",
 ]
+
+
+READER_PARTS = [
+    *(f"<{t}>" for t in TAGS),
+    *(f"</{t}>" for t in TAGS),
+    *["\n"] * 4,
+    *["x", "слово ", " ", "  ", " \t", "<", ">", '"', "</", "&amp"],
+    *["<!--", "-->", '<b title="', "<u>", "<?", "<!x"],
+]
+
+
+def test_reader_matches_layout():
+    rnd = random.Random(1)
+    reader = Reader()
+    for _ in range(3000):
+        text = "".join(rnd.choice(READER_PARTS) for _ in range(rnd.randint(0, 30)))
+        rows = text.split("\n")
+        # один Reader на все тексты: куски из кэша должны совпасть с разбором заново
+        reader.update(rows)
+        starts = [0]
+        for row in rows:
+            starts.append(starts[-1] + len(row) + 1)
+        got = []
+        for c, (row, first) in enumerate(reader.chunks):
+            end = reader.chunks[c + 1][1] if c + 1 < len(reader.chunks) else None
+            at = starts[row]
+            for line in reader.lines[first:end]:
+                runs = [dataclasses.replace(r, raw=r.raw + at) for r in line.runs]
+                got.append((line.align, line.start + at, line.end + at, runs))
+        want = [(x.align, x.start, x.end, x.runs) for x in layout(text)]
+        assert got == want, text
+        # курсор в каждой позиции - строка читателя, которая её содержит
+        for raw in range(len(text) + 1):
+            row = bisect.bisect_right(starts, raw) - 1
+            n = reader.find(rows, row, raw - starts[row])
+            assert got[n][1] <= raw and (n + 1 == len(got) or raw < got[n + 1][1])
 
 
 @pytest.mark.parametrize("text", MAP_TEXTS)

@@ -136,14 +136,15 @@ class Line:
     runs: list[Run]
 
 
+Tag = tuple[int, int, str, bool]  # начало, конец, имя, закрывающий
+
+
 class _Tags(_Parser):
     """позиции тегов, которые читатель считает тегами; остальное - текст"""
 
     def __init__(self, text: str) -> None:
         super().__init__(text, convert_charrefs=False)
-        self.tags: list[
-            tuple[int, int, str, bool]
-        ] = []  # начало, конец, имя, закрывающий
+        self.tags: list[Tag] = []
 
     def set_cdata_mode(self, *args: object, **kwargs: object) -> None:
         # <style>, <script> и т. п. для читателя - текст, теги после них работают
@@ -257,7 +258,7 @@ def _hide_spaces(line: Line) -> None:
     line.runs = runs
 
 
-def tag_list(text: str) -> list[tuple[int, int, str, bool]]:
+def tag_list(text: str) -> list[Tag]:
     """теги, которые видит читатель: начало, конец, имя, закрывающий"""
     tags = _Tags(text)
     tags.feed(text)
@@ -265,22 +266,129 @@ def tag_list(text: str) -> list[tuple[int, int, str, bool]]:
     return tags.tags
 
 
-def layout(text: str) -> list[Line]:
-    """строки читателя до переноса по ширине"""
+def _lay(
+    text: str,
+    tags: list[Tag],
+    inline: tuple[str, ...] = (),
+    blocks: tuple[str, ...] = (),
+) -> _Layout:
     state = _Layout()
+    state.inline, state.blocks = list(inline), list(blocks)
     state.new_line(0, 0)
     raw = 0
-    for start, end, name, closing in tag_list(text):
+    for start, end, name, closing in tags:
         state.text(text[raw:start], raw)
         state.tag(start, end, name, closing)
         raw = end
     state.text(text[raw:], raw)
     state.lines[-1].end = len(text)
-    if state.block_end == len(state.lines) - 1 and not state.lines[-1].runs:
-        state.lines.pop()
     for line in state.lines:
         _hide_spaces(line)
+    return state
+
+
+def _ends_block(state: _Layout) -> bool:
+    return state.block_end == len(state.lines) - 1 and not state.lines[-1].runs
+
+
+def layout(text: str) -> list[Line]:
+    """строки читателя до переноса по ширине"""
+    state = _lay(text, tag_list(text))
+    if _ends_block(state):
+        state.lines.pop()
     return state.lines
+
+
+@dataclass(frozen=True)
+class _Piece:
+    lines: list[Line]  # позиции от начала куска
+    inline: tuple[str, ...]  # открытые теги после куска
+    blocks: tuple[str, ...]
+    ends_block: bool
+    rows: int
+
+
+def _parse(text: str, last: bool) -> list[Tag] | None:
+    """None - разбор не закончен в конце куска (<!--, <b title=" тянутся дальше)"""
+    src = text if last else text + "\n"
+    tags = _Tags(src)
+    tags.feed(src)
+    if last:
+        tags.close()
+    elif tags.rawdata:
+        return None
+    return tags.tags
+
+
+class Reader:
+    """layout() по строкам документа: после правки заново разбираются только
+    изменённые строки, а собираются ещё и те, перед которыми сменились открытые теги"""
+
+    def __init__(self) -> None:
+        # сборка и разбор одной строки документа; не чистятся на каждой правке:
+        # закрытие тега возвращает прежние открытые теги и прежние куски
+        self.pieces: dict[
+            tuple[str, tuple[str, ...], tuple[str, ...], bool], _Piece
+        ] = {}
+        self.parsed: dict[tuple[str, bool], list[Tag] | None] = {}
+        self.lines: list[Line] = []  # позиции от начала своего куска
+        self.chunks: list[
+            tuple[int, int]
+        ] = []  # первая строка документа, первая в lines
+
+    def update(self, rows: list[str]) -> None:
+        pieces: dict[tuple[str, tuple[str, ...], tuple[str, ...], bool], _Piece] = {}
+        parsed: dict[tuple[str, bool], list[Tag] | None] = {}
+        self.lines, self.chunks = [], []
+        inline: tuple[str, ...] = ()
+        blocks: tuple[str, ...] = ()
+        i = 0
+        piece = None
+        while i < len(rows):
+            last = i == len(rows) - 1
+            key = (rows[i], inline, blocks, last)
+            piece = self.pieces.get(key)
+            if piece is None:
+                pkey = rows[i], last
+                tags = (
+                    self.parsed[pkey] if pkey in self.parsed else _parse(rows[i], last)
+                )
+                parsed[pkey] = tags
+                k = 1
+                # shortcut: кусок из нескольких строк не кэшируется и разбирается
+                # на каждую правку, кэшировать, если такие куски окажутся длинными
+                while tags is None:
+                    k *= 2
+                    tags = _parse("\n".join(rows[i : i + k]), i + k >= len(rows))
+                state = _lay("\n".join(rows[i : i + k]), tags, inline, blocks)
+                piece = _Piece(
+                    state.lines,
+                    tuple(state.inline),
+                    tuple(state.blocks),
+                    _ends_block(state),
+                    len(rows[i : i + k]),
+                )
+            if piece.rows == 1:
+                pieces[key] = piece
+            self.chunks.append((i, len(self.lines)))
+            self.lines.extend(piece.lines)
+            inline, blocks = piece.inline, piece.blocks
+            i += piece.rows
+        if piece and piece.ends_block:
+            self.lines.pop()
+        self.pieces |= pieces
+        self.parsed |= parsed
+        if len(self.pieces) > 3 * len(rows) + 100:
+            self.pieces, self.parsed = pieces, parsed
+
+    def find(self, rows: list[str], row: int, col: int) -> int:
+        """строка читателя, где стоит курсор документа"""
+        c = bisect.bisect_right(self.chunks, (row, len(self.lines))) - 1
+        first, start = self.chunks[c]
+        raw = sum(len(r) + 1 for r in rows[first:row]) + col
+        end = self.chunks[c + 1][1] if c + 1 < len(self.chunks) else len(self.lines)
+        n = bisect.bisect_right(self.lines, raw, start, end, key=lambda x: x.start)
+        return max(0, min(n - 1, len(self.lines) - 1))
 
 
 def count(text: str) -> tuple[int, int]:

@@ -245,6 +245,9 @@ class StartPageTab(TabPane):
     class Relogin(Message):
         """Повторить вход из офлайна; обрабатывает App."""
 
+    class GoOffline(Message):
+        """Связь пропала посреди загрузки списков; обрабатывает App."""
+
     def __init__(
         self,
         api: FicbookAPI | None,
@@ -303,7 +306,7 @@ class StartPageTab(TabPane):
             self.query_one("#greeting", Label).update(Content(f"Привет, {user.name}!"))
         except FicbookAPIError as e:
             report_api_error(self, e, "Не удалось загрузить профиль")
-            if isinstance(e, STOP_LOADING):
+            if self.stop_loading(e):
                 return
 
         seen: set[str] = set()
@@ -319,7 +322,7 @@ class StartPageTab(TabPane):
                 if not isinstance(fics, FicbookAPIError):
                     raise fics
                 report_api_error(self, fics, f"Не удалось загрузить список «{label}»")
-                if isinstance(fics, STOP_LOADING):
+                if self.stop_loading(fics):
                     return
                 all_loaded = False
                 continue
@@ -340,7 +343,7 @@ class StartPageTab(TabPane):
                         report_api_error(
                             self, e, f"Не удалось проверить права на «{fic.title}»"
                         )
-                        if isinstance(e, STOP_LOADING):
+                        if self.stop_loading(e):
                             return
                         readonly = None
                 plan = plan_fic(fic, readonly, stored, broken)
@@ -357,6 +360,12 @@ class StartPageTab(TabPane):
 
         if all_loaded:
             await self.show_gone(seen)
+
+    def stop_loading(self, e: FicbookAPIError) -> bool:
+        """Дальше грузить бессмысленно; без связи - офлайн-список вместо пустого."""
+        if isinstance(e, NetworkError):
+            self.post_message(StartPageTab.GoOffline())
+        return isinstance(e, STOP_LOADING)
 
     async def load_offline(self) -> None:
         """Разделы из fic.json - списка с последнего входа."""

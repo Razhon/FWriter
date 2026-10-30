@@ -1,9 +1,11 @@
 import asyncio
+import bisect
 import logging
 from dataclasses import replace
 
 import pytest
 from textual.app import App
+from textual.geometry import Offset
 from textual.widgets import Collapsible, Input, Label, Log, OptionList, TabbedContent
 from textual.widgets._collapsible import CollapsibleTitle
 from textual.widgets.text_area import Selection
@@ -25,7 +27,7 @@ from fwriter.core.api.models import (
     SlimChapterInfo,
     UserInfo,
 )
-from fwriter.core.markup import MarkupError
+from fwriter.core.markup import MarkupError, layout
 from fwriter.core.merge import Manual, merge3
 from fwriter.core.storage import ChapterStorage, MergeChoice, Version
 from fwriter.core.sync import Published, Synced, SyncKind
@@ -40,12 +42,13 @@ from fwriter.screens import (
 from fwriter.screens.api_errors import report_api_error
 from fwriter.screens.chapter import ChapterTab
 from fwriter.screens.diff import DiffScreen, aligned, diff_text, rev_line
-from fwriter.screens.editor import ChapterEditor
+from fwriter.screens.editor import ChapterEditor, breaks
 from fwriter.screens.menu import HelpScreen, MenuScreen
 from fwriter.screens.merge import MergeScreen
 from fwriter.screens.start_page import (
     FIC_SECTIONS,
     ChapterButton,
+    FicCollapsible,
     NewChapterButton,
     TrashButton,
 )
@@ -1503,6 +1506,34 @@ def test_connecting_screen_go_offline(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_network_lost_while_loading_lists_goes_offline(tmp_path, monkeypatch):
+    """Вход прошёл, списки не загрузились: офлайн-список с "Повторить вход", а не пустой экран."""
+    monkeypatch.setattr(SecretStorage, "get_auth", lambda: ({"rme": "1"}, "ua"))
+    offline_storage(tmp_path)
+    online = api_without_fics()
+
+    async def timeout(role: str) -> list[Fic]:
+        raise NetworkError("Сайт не ответил вовремя")
+
+    online.get_fics = timeout
+    fake_logins(monkeypatch, [online])
+
+    async def run():
+        app = FWriterApp()
+        async with app.run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            main = app.main_screen
+            assert main and main.api is None and app.screen is main
+            assert main.query(".relogin_btn")
+            assert FIC.id in {c.fic.id for c in main.query(FicCollapsible)}
+            assert "Работаем офлайн" in [n.message for n in app._notifications]
+
+    asyncio.run(run())
+
+
 def test_relogin_button_shows_attempt(tmp_path, monkeypatch):
     """Во время повтора кнопка неактивна, после неудачи - снова "Повторить вход"."""
     monkeypatch.setattr(SecretStorage, "get_auth", lambda: ({"rme": "1"}, "ua"))
@@ -2257,5 +2288,85 @@ def test_f9_tweaks_offline(tmp_path):
             # F8 - справка
             await pilot.press("f8")
             assert isinstance(pilot.app.screen, HelpScreen)
+
+    asyncio.run(run())
+
+
+def test_reader_panel_and_markup_error(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "<b>раз</b>\nдва")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            tab = main.query_one(ChapterTab)
+            editor, panel = tab.editor, tab.panel
+            await pilot.pause()
+            # панель без тегов, абзац под курсором - первый
+            assert panel.render_line(0).text.rstrip() == "раз"
+            assert panel.render_line(1).text.rstrip() == "два"
+            assert panel.current == 0
+            # центр по видимому тексту экранной строки, а не по отрезкам со стилем
+            line = layout("<center>раз два <b>длинноеслово</b></center>")[0]
+            assert [s.text for s in panel.wrap(line, 10)] == [
+                " раз два",
+                "длинноесло",
+                "    во",
+            ]
+            editor.move_cursor((1, 0))
+            await pilot.pause()
+            assert panel.current == 1
+            # незакрытый тег: строка подсвечена, под редактором текст ошибки
+            editor.insert("<i>")
+            await pilot.pause()
+            await pilot.app.workers.wait_for_complete()
+            assert editor.error_line == 1
+            assert tab.markup_error.display
+            assert "<i> не закрыт" in str(tab.markup_error.render())
+            editor.insert("</i>")
+            await pilot.pause()
+            await pilot.app.workers.wait_for_complete()
+            assert editor.error_line is None
+            assert not tab.markup_error.display
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("text", "width", "lines"),
+    [
+        ("раз два  три четыре", 9, ["раз два", "три", "четыре"]),
+        ("раз два", 30, ["раз два"]),
+        # длинное слово режется, пробелы в конце строки не занимают места
+        ("абвгде ж   ", 4, ["абвг", "де", "ж"]),
+        ("", 5, [""]),
+    ],
+)
+def test_reader_breaks(text: str, width: int, lines: list[str]):
+    assert [text[a:b] for a, b in breaks(text, width)] == lines
+
+
+def test_reader_panel_follows_scroll(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    text = "\n".join(f"<b>абзац {i}</b>" + " слово" * (i % 3 * 20) for i in range(200))
+    storage.write_draft(FIC.id, "00000000", text)
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            tab = main.query_one(ChapterTab)
+            editor, panel = tab.editor, tab.panel
+            await pilot.pause()
+            # колёсико без движения курсора: наверху панели тот же абзац
+            for y in (40, 41, 300):
+                editor.scroll_to(y=y, animate=False)
+                await pilot.pause()
+                row = editor.wrapped_document.offset_to_location(Offset(0, y))[0]
+                n = bisect.bisect_right(panel.tops, int(panel.scroll_y)) - 1
+                assert panel.reader.find(editor.document.lines, row, 0) == n
 
     asyncio.run(run())

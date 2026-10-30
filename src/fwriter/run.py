@@ -84,6 +84,21 @@ class FWriterApp(App):
             self.switch_mode("connecting")
         self.login_saved(cookies, user_agent)
 
+    def on_start_page_tab_go_offline(self) -> None:
+        main = self.main_screen
+        # экран уже сменился: истекла сессия или пришло второе сообщение
+        if self.current_mode != "main" or not main or main.api is None:
+            return
+        # как при повторе входа: без записи черновиков экран не снимаем
+        if not main.save_all(notify=False):
+            self.notify(
+                "Не удалось записать черновик на диск, офлайн-список не открыт",
+                severity="error",
+            )
+            return
+        self.notify("Работаем офлайн", severity="warning")
+        self.open_main(None)
+
     def on_connecting_screen_go_offline(self) -> None:
         if self.current_mode != "connecting":  # вход уже закончился
             return

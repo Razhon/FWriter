@@ -140,3 +140,44 @@ ChapterEditor > .chapter-editor--emdash {
 ChapterEditor > .chapter-editor--endash {
     background: $error;
 }
+
+ChapterEditor > .chapter-editor--error {
+    background: $error-muted;
+}
+
+/* редактор и панель читателя пополам, название и ошибка разметки - по краям */
+ChapterTab {
+    layout: horizontal;
+
+    Input {
+        dock: top;
+    }
+
+    ChapterEditor {
+        width: 1fr;
+    }
+}
+
+#markup_error {
+    dock: bottom;
+    height: auto;
+    padding: 0 1;
+    color: $text-error;
+    background: $error-muted;
+}
+
+ReaderPanel {
+    width: 1fr;
+    /* сверху и снизу - как рамка редактора: строки вровень */
+    padding: 1 1;
+    overflow-y: scroll;
+    border-left: vkey $foreground 20%;
+
+    & > .reader-panel--footnote {
+        color: $text-muted;
+    }
+
+    & > .reader-panel--current {
+        background: $foreground 8%;
+    }
+}
