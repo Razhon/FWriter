@@ -2053,7 +2053,7 @@ def test_diff_screen_filter_survives_version_change(tmp_path):
             screen.compare()
             await pilot.pause()
             assert screen.current == 1
-            await pilot.press("down")
+            await pilot.press("right")
             assert screen.current == 1
             assert screen.shown[1].has_class("-current")
 

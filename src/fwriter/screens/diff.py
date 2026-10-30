@@ -154,8 +154,8 @@ class DiffScreen(Screen[Version | None]):
     """F3: дифф двух версий; R возвращает версию из "Было" для восстановления."""
 
     CSS_PATH = "../tcss/diff.tcss"
-    # без фокуса ↑↓ ходят по блокам, Tab - к спискам версий
-    AUTO_FOCUS = ""
+    # фокус в "Было": ↑↓ листают версии, ←→ ходят по блокам
+    AUTO_FOCUS = "#diff_old"
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("down,right", "step(1)", "Правки", key_display="↑↓"),
