@@ -78,8 +78,10 @@ class FicbookAPI:
             start=1,
         )
     }
-    # div.profile-area есть в шапке любой страницы, пока сессия жива
-    _PROFILE_AREA_RE = re.compile(r'class="(?:[^"]*\s)?profile-area[\s"]')
+    # window.ficbook.userInfo есть в любой странице, это JS-литерал, а не JSON
+    _USER_INFO_RE = re.compile(r"userInfo:\s*\{([^}]*)\}")
+    _LOGGED_IN_RE = re.compile(r"\bisLoggedIn:\s*(true|false)\b")
+    _INFO_SLUG_RE = re.compile(r"\bslug:\s*'([^']+)'")
 
     # Cloudflare: 16-й запрос за 10 с - 429 и блок на 20 с; лимит с запасом
     RATE_LIMIT = 12
@@ -95,6 +97,9 @@ class FicbookAPI:
             timeout=5.0,
             follow_redirects=False,
         )
+        self._start_cookies = cookies
+        # сайт выкинул из сессии: её cookies сохранять незачем
+        self.logged_out = False
         self._throttle = asyncio.Lock()
         # время начала последних RATE_LIMIT запросов
         self._sent: deque[float] = deque(maxlen=self.RATE_LIMIT)
@@ -147,6 +152,17 @@ class FicbookAPI:
     async def close(self) -> None:
         await self.client.aclose()
 
+    def renewed_cookies(self) -> dict[str, str] | None:
+        """Cookies сессии, если сайт их обновил и не выкинул из сессии; иначе None."""
+        cookies = {
+            c.name: c.value
+            for c in self.client.cookies.jar
+            if c.name in self.AUTH_COOKIES and c.value
+        }
+        if self.logged_out or cookies == self._start_cookies:
+            return None
+        return cookies
+
     async def get_user_info(self) -> UserInfo:
         if not self.user:  # после login() уже заполнен
             self.user = self._parse_user((await self._get("/")).text)
@@ -154,12 +170,11 @@ class FicbookAPI:
 
     @classmethod
     def _parse_user(cls, html: str) -> UserInfo:
-        """Slug и ник из шапки любой страницы, где пользователь вошёл."""
+        """Slug из userInfo и ник из шапки любой страницы, где пользователь вошёл."""
+        # наличие userInfo уже проверил _get
+        info = req(cls._USER_INFO_RE.search(html), "window.ficbook.userInfo")
+        match = req(cls._INFO_SLUG_RE.search(info.group(1)), "slug в userInfo")
         soup = BeautifulSoup(html, "html.parser")
-        # наличие блока уже проверил _get
-        profile_area = req(soup.find("div", class_="profile-area"), "блок профиля")
-        link = req(profile_area.select_one('a[href*="/authors/"]'), "ссылка на профиль")
-        match = req(cls._USER_SLUG_RE.search(str(link.get("href", ""))), "slug автора")
         avatar = req(
             soup.select_one(".btn-top-bar-profile-menu img[alt]"), "аватар с ником"
         )
@@ -474,9 +489,14 @@ class FicbookAPI:
     async def _get(self, url: str) -> httpx.Response:
         response = await self._send("GET", url)
         self._raise_for_status(response)
-        # GET защищённой страницы без сессии отвечает 200, но без блока профиля
-        if not self._PROFILE_AREA_RE.search(response.text):
-            raise UserNotLoggedInError("Сессия истекла: на странице нет блока профиля")
+        # открытая страница без сессии отвечает 200 с isLoggedIn: false
+        info = req(self._USER_INFO_RE.search(response.text), "window.ficbook.userInfo")
+        logged_in = req(
+            self._LOGGED_IN_RE.search(info.group(1)), "isLoggedIn в userInfo"
+        )
+        if logged_in.group(1) != "true":
+            self.logged_out = True
+            raise UserNotLoggedInError("Сессия истекла: сайт не видит входа")
         return response
 
     async def _post(self, url: str, **kwargs) -> httpx.Response:
@@ -504,8 +524,17 @@ class FicbookAPI:
             raise NetworkError("Нет связи с сайтом") from e
         # без заголовков и тела: там cookies и текст глав
         log.debug("%s %s -> %d", method, url, response.status_code)
+        self._drop_stale_cookies()
         self._raise_if_logged_out(response)
         return response
+
+    def _drop_stale_cookies(self) -> None:
+        # стартовые cookies лежат без домена, cookie от сайта - с доменом рядом, а не
+        # вместо; иначе уходят обе, старая первой, и PHP берёт её
+        jar = self.client.cookies.jar
+        fresh = {c.name for c in jar if c.domain}
+        for c in [c for c in jar if not c.domain and c.name in fresh]:
+            jar.clear(c.domain, c.path, c.name)
 
     @staticmethod
     def _raise_for_status(response: httpx.Response) -> None:
@@ -517,10 +546,10 @@ class FicbookAPI:
             )
             raise SiteError(response.status_code)
 
-    @staticmethod
-    def _raise_if_logged_out(response: httpx.Response) -> None:
+    def _raise_if_logged_out(self, response: httpx.Response) -> None:
         if (
             response.is_redirect
             and httpx.URL(response.headers.get("location", "")).path == "/login"
         ):
+            self.logged_out = True
             raise UserNotLoggedInError("Сессия истекла: сайт перенаправил на /login")

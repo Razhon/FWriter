@@ -11,6 +11,7 @@ from textual.widgets import Footer, Label, Tab, TabbedContent, Tabs
 from ..core.api.client import FicbookAPI
 from ..core.api.models import Fic, Role, SlimChapterInfo, can_manage
 from ..core.storage import DATA_DIR, ChapterMeta, ChapterStorage
+from ..secrets import SecretStorage
 from .api_errors import report_disk_error
 from .chapter import ChapterTab
 from .start_page import ChapterButton, FicCollapsible, NewChapterButton, StartPageTab
@@ -198,4 +199,10 @@ class MainScreen(Screen):
 
     async def on_unmount(self) -> None:
         if self.api:
+            # сайт меняет PHPSESSID; без записи после перезапуска ушла бы старая
+            if cookies := self.api.renewed_cookies():
+                try:
+                    SecretStorage.set_cookies(cookies)
+                except Exception:  # бэкенды keyring бросают свои типы
+                    log.warning("обновлённые cookies не сохранены", exc_info=True)
             await self.api.close()

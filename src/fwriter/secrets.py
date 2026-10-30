@@ -16,8 +16,12 @@ class SecretStorage:
 
     @classmethod
     def set_auth(cls, cookies: dict[str, str], user_agent: str) -> None:
-        cls._set("cookies", json.dumps(cookies))
+        cls.set_cookies(cookies)
         cls._set("user_agent", user_agent)
+
+    @classmethod
+    def set_cookies(cls, cookies: dict[str, str]) -> None:
+        cls._set("cookies", json.dumps(cookies))
 
     @classmethod
     def _get(cls, key) -> str | None:

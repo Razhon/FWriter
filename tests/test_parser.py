@@ -118,7 +118,8 @@ def test_parse_cookies(text: str, expected: dict[str, str] | None):
     assert FicbookAPI.parse_cookies(text) == expected
 
 
-PROFILE = '<div class="profile-area"><a href="/home/news">x</a><a href="/authors/42">x</a></div>'
+USER_INFO = "<script>window.ficbook = { userInfo: { slug: '42', isLoggedIn: true, }, };</script>"
+LOGGED_OUT = USER_INFO.replace("'42', isLoggedIn: true", "'', isLoggedIn: false")
 AVATAR = '<a class="btn-top-bar-profile-menu"><img alt=" Серый – Кот "></a>'
 HOME_URL = "https://ficbook.net/"
 
@@ -126,9 +127,9 @@ HOME_URL = "https://ficbook.net/"
 @pytest.mark.parametrize(
     ("response", "ok"),
     [
-        (httpx.Response(200, text=AVATAR + PROFILE), True),
-        (httpx.Response(200, text=AVATAR), False),  # не вошли
-        (httpx.Response(200, text=PROFILE), False),  # шапка поменялась
+        (httpx.Response(200, text=AVATAR + USER_INFO), True),
+        (httpx.Response(200, text=AVATAR + LOGGED_OUT), False),  # не вошли
+        (httpx.Response(200, text=USER_INFO), False),  # шапка поменялась
         (httpx.Response(200, text="<html>Cloudflare</html>"), False),
         (httpx.Response(403, request=httpx.Request("GET", HOME_URL)), False),
     ],
@@ -175,10 +176,18 @@ def test_login_site_unavailable_passes_through(monkeypatch, error):
 
 
 def test_expired_session_get_raises():
-    logged_out = BETA_PAGE.replace("profile-area", "login-area")
+    logged_out = BETA_PAGE.replace("isLoggedIn: true", "isLoggedIn: false")
 
     with pytest.raises(UserNotLoggedInError):
         parse(logged_out)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"), [("userInfo", "user"), ("isLoggedIn: true,", "")]
+)
+def test_get_without_user_info_raises(old: str, new: str):
+    with pytest.raises(APIChangedError, match="userInfo"):
+        parse(BETA_PAGE.replace(old, new))
 
 
 @pytest.mark.parametrize(
@@ -289,7 +298,7 @@ def test_parse_user_slug(name: str, slug: str):
 @pytest.mark.parametrize(("status", "readonly"), [(200, False), (404, True)])
 def test_is_readonly(status: int, readonly: bool):
     """Работу без прав от работы без глав различает код ответа /parts."""
-    # 200 у _get требует блок профиля
+    # 200 у _get требует userInfo с isLoggedIn: true
     page = (FIXTURES / "index_old_account_raw.html").read_text(encoding="utf-8")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -564,7 +573,7 @@ def test_get_chapter_revisions_date_from_title():
 
 def test_get_chapter_revisions_empty_raises():
     url = "/home/versions/mine/1001/parts/2001/history"
-    html = PROFILE + "<main><table><tbody></tbody></table></main>"
+    html = USER_INFO + "<main><table><tbody></tbody></table></main>"
     with pytest.raises(APIChangedError, match="нет строк"):
         fetch(html, lambda api: api.get_chapter_revisions(url), url)
 
@@ -730,3 +739,46 @@ def test_revert_last_revision_raises():
     # у последней правки вместо формы плашка "Это текущая версия"
     with pytest.raises(APIChangedError, match="форма отката"):
         revert(httpx.Response(302), "participated-00000000-history-last")
+
+
+def cookie_api(handler) -> FicbookAPI:
+    start = {"PHPSESSID": "old", "rme": "r"}
+    api = FicbookAPI(start)
+    api.client = httpx.AsyncClient(
+        base_url=FicbookAPI.BASE_URL,
+        cookies=start,
+        transport=httpx.MockTransport(handler),
+    )
+    return api
+
+
+RENEW = {"set-cookie": "PHPSESSID=new; path=/; domain=.ficbook.net"}
+
+
+def test_renewed_cookie_replaces_start_one():
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.headers["cookie"])
+        return httpx.Response(200, text=BETA_PAGE, headers=RENEW)
+
+    api = cookie_api(handler)
+    assert api.renewed_cookies() is None
+
+    async def twice() -> None:
+        await api._get("/")
+        await api._get("/")
+
+    asyncio.run(twice())
+    assert sorted(sent[1].split("; ")) == ["PHPSESSID=new", "rme=r"]
+    assert api.renewed_cookies() == {"PHPSESSID": "new", "rme": "r"}
+
+
+def test_renewed_cookies_dropped_after_logout():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={**RENEW, "location": "/login"})
+
+    api = cookie_api(handler)
+    with pytest.raises(UserNotLoggedInError):
+        asyncio.run(api._get("/"))
+    assert api.renewed_cookies() is None

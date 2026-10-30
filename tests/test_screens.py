@@ -323,6 +323,36 @@ def test_expired_session_opens_login(monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("renewed", [{"PHPSESSID": "new"}, None])
+def test_exit_saves_renewed_cookies(monkeypatch, renewed):
+    monkeypatch.setattr(SecretStorage, "get_auth", lambda: ({"rme": "1"}, "ua"))
+    saved: list[dict[str, str]] = []
+    monkeypatch.setattr(SecretStorage, "set_cookies", saved.append)
+    api = FicbookAPI({})
+    api.user = UserInfo("1", "Кот")
+    api.renewed_cookies = lambda: renewed
+
+    async def fake_login(cookies, user_agent):
+        return api
+
+    async def no_fics(role: str) -> list[Fic]:
+        return []
+
+    monkeypatch.setattr(FicbookAPI, "login", fake_login)
+    api.get_fics = no_fics
+
+    async def run():
+        async with FWriterApp().run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert isinstance(pilot.app.screen, MainScreen)
+            await pilot.press("ctrl+q")
+
+    asyncio.run(run())
+    assert saved == ([renewed] if renewed else [])
+    assert api.client.is_closed
+
+
 FIC = Fic("00000000", "Фанфик", [SlimChapterInfo("00000000", "Глава")])
 
 
