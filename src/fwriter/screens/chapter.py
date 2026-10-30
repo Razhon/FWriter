@@ -171,7 +171,8 @@ class ChapterTab(TabPane):
         self.editor = ChapterEditor()
         self.panel = ReaderPanel(self.reader)
         self.visual = VisualEditor(self.editor, self.reader)
-        self.visual.display = False
+        # WYSIWYG по умолчанию; с ошибкой разметки show_error() переключит на F7
+        self.editor.display = self.panel.display = False
         self.markup_error = Static(id="markup_error")
         self.markup_error.display = False
         # что сейчас идёт, первым в строке о главе: плашка над текстом сдвигала бы его;
@@ -373,9 +374,15 @@ class ChapterTab(TabPane):
                 severity="error",
             )
             return
+        self.switch(wysiwyg)
+
+    def switch(self, wysiwyg: bool) -> None:
+        # фокус - только если он был в тексте: фокус в скрытой вкладке её откроет
+        refocus = self.screen.focused in (self.editor, self.visual)
         self.editor.display = self.panel.display = not wysiwyg
         self.visual.display = wysiwyg
-        self.active.focus()
+        if refocus:
+            self.active.focus()
         if wysiwyg:
             # ширина у показанного виджета будет после отрисовки
             self.visual.call_after_refresh(self.visual.shown)
@@ -435,6 +442,15 @@ class ChapterTab(TabPane):
         self.markup_error.display = error is not None
         if error:
             self.markup_error.update(f"Строка {error.line + 1}: {error.message}")
+        # без тегов битую разметку однозначно не показать
+        if error and self.visual.display:
+            self.editor.cursor_location = (error.line, error.col)
+            self.switch(False)
+            self.notify(
+                f"Ошибка разметки в строке {error.line + 1}: {error.message}. "
+                "Включён режим разметки (F7)",
+                severity="warning",
+            )
 
     @on(Input.Changed)
     def rename_tab(self, event: Input.Changed) -> None:

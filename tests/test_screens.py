@@ -6,9 +6,9 @@ from dataclasses import replace
 import pytest
 from rich.style import Style
 from textual.app import App
+from textual.content import Content
 from textual.geometry import Offset
-from textual.widgets import Collapsible, Input, Label, Log, OptionList, TabbedContent
-from textual.widgets._collapsible import CollapsibleTitle
+from textual.widgets import Input, Label, Log, OptionList, TabbedContent
 from textual.widgets.text_area import Selection
 
 from fwriter.core.api.client import FicbookAPI
@@ -49,10 +49,11 @@ from fwriter.screens.menu import HelpScreen, MenuScreen
 from fwriter.screens.merge import MergeScreen
 from fwriter.screens.start_page import (
     FIC_SECTIONS,
-    ChapterButton,
-    FicCollapsible,
-    NewChapterButton,
-    TrashButton,
+    NEW_ID,
+    TRASH_FIC_ID,
+    ChapterList,
+    FicList,
+    StartPageTab,
 )
 from fwriter.screens.visual import VisualEditor
 from fwriter.screens.widgets import ClickableLabel
@@ -103,8 +104,9 @@ def test_titles_are_plain_text():
             await pilot.app.workers.wait_for_complete()
             greeting = pilot.app.screen.query_one("#greeting", Label)
             assert str(greeting.render()) == f"Привет, {tricky}!"
-            title = pilot.app.screen.query_one(CollapsibleTitle)
-            assert tricky in str(title.render())
+            fics = pilot.app.screen.query_one(FicList)
+            prompt = fics.get_option("author/1").prompt
+            assert isinstance(prompt, Content) and tricky in prompt.plain
 
     asyncio.run(run())
 
@@ -147,9 +149,8 @@ def test_failed_fic_list_keeps_others():
         async with TestApp().run_test() as pilot:
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
-            titles = [str(c.title) for c in main.query(Collapsible)]
-            assert titles == ["author", "gamma"]
-            assert not main.query_one("#loading").visible
+            assert fic_titles(main) == ["author", "gamma"]
+            assert not main.query("#loading")
             # обе ошибки - в одном окне
             errors = [s for s in pilot.app.screen_stack if isinstance(s, ErrorScreen)]
             assert len(errors) == 1
@@ -218,7 +219,7 @@ def test_setup_logging(tmp_path, monkeypatch):
 
 
 def test_sections_match_api_roles():
-    assert [r for r, _ in FIC_SECTIONS] == list(FicbookAPI.FIC_LISTS)
+    assert [r for r, _, _ in FIC_SECTIONS] == list(FicbookAPI.FIC_LISTS)
 
 
 def test_failed_saved_login_opens_login_with_error(monkeypatch):
@@ -285,12 +286,7 @@ def test_new_chapter_only_for_managers():
     async def run():
         async with TestApp().run_test() as pilot:
             await pilot.app.workers.wait_for_complete()
-            with_button = [
-                str(c.title)
-                for c in main.query(Collapsible)
-                if c.query(".new_chapter_btn")
-            ]
-            assert with_button == ["author", "coauthor"]
+            assert with_new_chapter(main) == ["author", "coauthor"]
 
     asyncio.run(run())
 
@@ -363,7 +359,41 @@ FIC = Fic("00000000", "Фанфик", [SlimChapterInfo("00000000", "Глава")
 
 
 def chapter_titles(main: MainScreen) -> list[str]:
-    return [str(b.render()) for b in main.query(".chapter_btn")]
+    tab = main.query_one(StartPageTab)
+    return [tab.chapter_label(e, r).plain for e in tab.entries for r in e.rows]
+
+
+def fic_titles(main: MainScreen) -> list[str]:
+    return [e.fic.title for e in main.query_one(StartPageTab).entries]
+
+
+def with_new_chapter(main: MainScreen) -> list[str]:
+    """Работы, где можно создать главу."""
+    tab = main.query_one(StartPageTab)
+    return [e.fic.title for e in tab.entries if tab.can_create(e)]
+
+
+async def highlight(
+    pilot, main: MainScreen, fic_id: str, option_id: str
+) -> ChapterList:
+    """Курсор на работу, фокус - в её главы на строку option_id."""
+    fics = main.query_one(FicList)
+    tab = main.query_one(StartPageTab)
+    key = next(e.key for e in tab.entries if e.fic.id == fic_id)
+    fics.highlighted = fics.get_option_index(key)
+    await pilot.pause()
+    chapters = main.query_one(ChapterList)
+    chapters.focus()
+    chapters.highlighted = chapters.get_option_index(option_id)
+    await pilot.pause()
+    return chapters
+
+
+async def select_chapter(pilot, main: MainScreen, fic_id: str, option_id: str) -> None:
+    """Enter на строке списка глав."""
+    await highlight(pilot, main, fic_id, option_id)
+    await pilot.press("enter")
+    await pilot.pause()
 
 
 def test_readonly_fic_keeps_known_chapters(tmp_path):
@@ -448,17 +478,9 @@ def test_readonly_check_failure_keeps_section(tmp_path):
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
             await pilot.app.workers.wait_for_complete()
-            assert [str(c.title) for c in main.query(Collapsible)] == [
-                "Пустая",
-                "Старая",
-                FIC.title,
-            ]
+            assert fic_titles(main) == ["Пустая", "Старая", FIC.title]
             # без fic.json - без прав, пока не проверим
-            assert [
-                str(c.title)
-                for c in main.query(Collapsible)
-                if c.query(".new_chapter_btn")
-            ] == [FIC.title]
+            assert with_new_chapter(main) == [FIC.title]
             assert chapter_titles(main) == ["Глава", "Глава"]
             # непроверенные работы на диск не пишутся
             fics, _ = storage.read_fics()
@@ -550,8 +572,8 @@ def test_chapter_tab_saves_draft(tmp_path, monkeypatch):
 
             async def open_and_type(keys: str) -> ChapterTab:
                 # мышью: фокус на нажатой главе не должен возвращать стартовую вкладку
-                await pilot.click(".chapter_btn")
-                # ChapterButton.Open должен дойти до MainScreen и запустить воркер
+                await pilot.click(ChapterList, offset=(5, 1))
+                # OpenChapter должен дойти до MainScreen и запустить воркер
                 await pilot.pause()
                 await pilot.app.workers.wait_for_complete()
                 await pilot.pause(0.05)  # подсветка нажатия
@@ -563,7 +585,6 @@ def test_chapter_tab_saves_draft(tmp_path, monkeypatch):
                 return tab
 
             await pilot.app.workers.wait_for_complete()
-            await pilot.click(CollapsibleTitle)
             await open_and_type("!")
             assert draft() == "Текст.!"
 
@@ -658,20 +679,20 @@ def test_click_while_loading_sends_one_request(tmp_path):
             assert tab.editor.read_only
             # фокус в тексте, иначе TabbedContent вернётся к стартовой вкладке
             assert main.query_one(TabbedContent).active == tab.id
-            assert main.focused is tab.editor
+            assert main.focused is tab.visual
             assert tab.title_input.disabled and tab.note == "Глава загружается…"
             # повторное нажатие переключает на ту же вкладку, закрыть её до конца нельзя
             main.open_chapter(FIC, FIC.chapters[0], "author")
             await close_tab(pilot, main)
             assert len(main.query(ChapterTab)) == 1
             # клик по вкладке забрал фокус
-            tab.editor.focus()
+            tab.visual.focus()
 
             response.set()
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
             assert len(main.query(ChapterTab)) == 1
-            assert not tab.editor.read_only and main.focused is tab.editor
+            assert not tab.editor.read_only and main.focused is tab.visual
             assert not tab.title_input.disabled and tab.note is None
 
             # после закрытия глава открывается с диска, без второго запроса
@@ -861,7 +882,7 @@ def test_chapter_info_and_rename(tmp_path, monkeypatch):
             await pilot.press("f2")
             assert main.focused is tab.title_input
             await pilot.press("end", "?", "enter")
-            assert not tab.title_input.display and main.focused is tab.editor
+            assert not tab.title_input.display and main.focused is tab.visual
             assert str(main.query_one(TabbedContent).get_tab(tab).label) == "Глава?"
 
             # пустое название не остаётся ни на диске, ни в поле
@@ -1151,21 +1172,22 @@ def test_gone_fics_marked(tmp_path, beta_fails: bool):
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
             await pilot.app.workers.wait_for_complete()
-            titles = [str(c.title) for c in main.query(Collapsible)]
-            labels = [str(lb.render()) for lb in main.query(".fics_collapsibles_label")]
             if beta_fails:
-                assert titles == [FIC.title]
+                assert fic_titles(main) == [FIC.title]
                 return
-            assert titles == [FIC.title, "Удалённая", "Только новая"]
-            assert labels[-1].startswith("Нет на сайте")
-            *_, gone, only_new = main.query(Collapsible)
-            assert not gone.query(".new_chapter_btn")
-            assert [str(b.render()) for b in gone.query(".chapter_btn")] == [
+            assert fic_titles(main) == [FIC.title, "Удалённая", "Только новая"]
+            tab = main.query_one(StartPageTab)
+            gone, only_new = [e for e in tab.entries if e.gone_fic]
+            assert not tab.can_create(gone)
+            assert [tab.chapter_label(gone, r).plain for r in gone.rows] == [
                 "С черновиком"
             ]
-            assert [str(b.render()) for b in only_new.query(".chapter_btn")] == [
+            assert [tab.chapter_label(only_new, r).plain for r in only_new.rows] == [
                 "new-1 (не отправлена)"
             ]
+            # в списке работ - отдельным разделом
+            heads = [o.prompt for o in main.query_one(FicList).options if o.disabled]
+            assert str(heads[-1]).startswith("НЕТ НА САЙТЕ")
 
     asyncio.run(run())
 
@@ -1199,8 +1221,8 @@ def test_chapter_gone_from_site_marked(tmp_path, readonly: bool):
                 assert chapter_titles(main) == ["Глава"]
                 return
             assert chapter_titles(main) == ["Удалённая (нет на сайте)"]
-            btn = main.query_one(ChapterButton)
-            main.open_chapter(btn.fic, btn.chapter, btn.role)
+            [entry] = main.query_one(StartPageTab).entries
+            main.open_chapter(entry.fic, entry.rows[0].chapter, entry.role)
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
             tab = main.query_one(ChapterTab)
@@ -1242,8 +1264,9 @@ def test_offline_start_page_from_fic_json(tmp_path):
             assert "fics" in note.message and "8" in note.message
 
             # без связи главу без локальной копии не скачать
-            buttons = list(main.query(ChapterButton))
-            main.open_chapter(buttons[1].fic, buttons[1].chapter, "author")
+            [entry] = main.query_one(StartPageTab).entries
+            rows = entry.rows
+            main.open_chapter(entry.fic, rows[1].chapter, "author")
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
             assert not main.query(ChapterTab)
@@ -1252,7 +1275,7 @@ def test_offline_start_page_from_fic_json(tmp_path):
                 in list(pilot.app._notifications)[-1].message
             )
 
-            main.open_chapter(buttons[0].fic, buttons[0].chapter, "author")
+            main.open_chapter(entry.fic, rows[0].chapter, "author")
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
             assert main.query_one(ChapterTab).editor.text == "Текст."
@@ -1301,7 +1324,7 @@ def test_new_chapter_created_on_site(tmp_path, monkeypatch):
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
             await pilot.app.workers.wait_for_complete()
-            main.query_one(NewChapterButton).press()
+            await select_chapter(pilot, main, FIC.id, NEW_ID)
             await wait_new_chapter_tab(pilot, main)
             assert chapter_titles(main) == ["Глава", "Глава 2 (не отправлена)"]
             tab = main.query_one(ChapterTab)
@@ -1322,8 +1345,7 @@ def test_new_chapter_created_on_site(tmp_path, monkeypatch):
             assert "Глава создана на сайте как черновик" in messages
             # глава из списка под новым id открывает ту же вкладку, а не вторую
             await pilot.press("f1")
-            [btn] = [b for b in main.query(ChapterButton) if b.chapter.id == "2002"]
-            btn.action_press()
+            await select_chapter(pilot, main, FIC.id, "2002")
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
             assert main.query(ChapterTab).nodes == [tab]
@@ -1350,10 +1372,10 @@ def test_created_but_not_renamed_blocks_publish(tmp_path, monkeypatch):
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
             await pilot.app.workers.wait_for_complete()
-            # двойной клик: второе нажатие приходит уже от снятой кнопки
-            btn = main.query_one(NewChapterButton)
-            btn.press()
-            btn.press()
+            # двойной клик: второе нажатие приходит уже от перестроенного списка
+            chapters = await highlight(pilot, main, FIC.id, NEW_ID)
+            chapters.action_select()
+            chapters.action_select()
             await wait_new_chapter_tab(pilot, main)
             assert chapter_titles(main) == ["Глава", "Глава 2 (не отправлена)"]
             await pilot.press("f5", "f5")
@@ -1531,7 +1553,7 @@ def test_network_lost_while_loading_lists_goes_offline(tmp_path, monkeypatch):
             main = app.main_screen
             assert main and main.api is None and app.screen is main
             assert main.query(".relogin_btn")
-            assert FIC.id in {c.fic.id for c in main.query(FicCollapsible)}
+            assert FIC.id in {e.fic.id for e in main.query_one(StartPageTab).entries}
             assert "Работаем офлайн" in [n.message for n in app._notifications]
 
     asyncio.run(run())
@@ -1593,68 +1615,75 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
     api.get_fics = fake_get_fics
     main = MainScreen(api, storage)
 
-    async def press_twice(pilot, btn: ChapterButton) -> None:
-        btn.focus()
-        # подсветка нажатия глушит повтор раньше PRESS_DELAY
-        await pilot.pause(0.05)
+    async def press_twice(pilot, fic_id: str, option_id: str) -> None:
+        await highlight(pilot, main, fic_id, option_id)
         await pilot.press("x")
+        # подсветка нажатия глушит повтор раньше PRESS_DELAY
         await pilot.pause(0.05)
         await pilot.press("x")
         await pilot.pause()
 
+    def prompt(chapters: ChapterList, option_id: str) -> str:
+        text = chapters.get_option(option_id).prompt
+        assert isinstance(text, Content)
+        return text.plain
+
     async def run():
         async with MainScreenApp(main).run_test() as pilot:
             await pilot.app.workers.wait_for_complete()
-            site, new, gone1, gone2 = main.query(ChapterButton)
-            assert site.trash is None
-            assert not site.check_action("trash", ())
+            tab = main.query_one(StartPageTab)
+            chapters = await highlight(pilot, main, FIC.id, FIC.chapters[0].id)
+            # главу с сайта не удалить
+            assert not chapters.check_action("trash", ())
             # стартовая вкладка не закрывается, и F1 на ней некуда вести
             assert not main.check_action("start_page", ())
-            assert new.trash and gone2.trash
 
             # одно нажатие только спрашивает и само сбрасывается
-            new.focus()
+            await highlight(pilot, main, FIC.id, "new-1")
+            assert chapters.check_action("trash", ())
             await pilot.press("x")
             await pilot.pause()
-            assert str(new.trash.render()) == "Удалить? X"
+            assert prompt(chapters, "new-1").endswith("Удалить? Нажмите x ещё раз ")
             await pilot.pause(0.4)
-            assert str(new.trash.render()) == "X"
+            assert "Удалить" not in prompt(chapters, "new-1")
             assert storage.new_chapters(FIC.id)
 
-            await press_twice(pilot, new)
+            await press_twice(pilot, FIC.id, "new-1")
             assert not storage.new_chapters(FIC.id)
             assert chapter_titles(main) == ["Глава", "1", "2"]
 
             # открытая вкладка не даёт удалить
-            main.open_chapter(gone1.fic, gone1.chapter, "author")
+            gone = next(e for e in tab.entries if e.gone_fic)
+            main.open_chapter(gone.fic, gone.rows[0].chapter, "author")
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
             assert main.check_action("start_page", ())
             await pilot.press("f1")
-            await press_twice(pilot, gone1)
+            assert main.focused is main.query_one(FicList)
+            await press_twice(pilot, "2", "1")
             assert "закройте вкладку" in list(pilot.app._notifications)[-1].message
             assert storage.read_draft("2", "1") == "Раз."
             await main.query_one(TabbedContent).remove_pane(
                 main.query_one(ChapterTab).id or ""
             )
 
-            await press_twice(pilot, gone1)
+            await press_twice(pilot, "2", "1")
             assert storage.read_draft("2", "1") is None
             assert storage.read_draft("2", "2") == "Два."
 
             # работу целиком не даёт удалить вкладка любой её главы
-            (fic_trash,) = [b for b in main.query(TrashButton) if b.chapter is None]
-            main.open_chapter(gone2.fic, gone2.chapter, "author")
+            gone = next(e for e in tab.entries if e.gone_fic)
+            main.open_chapter(gone.fic, gone.rows[0].chapter, "author")
             await pilot.app.workers.wait_for_complete()
             await pilot.press("f1")
-            fic_trash.action_press()
+            await highlight(pilot, main, "2", TRASH_FIC_ID)
+            await pilot.press("x")
             await pilot.pause(0.05)
             # глав столько, сколько осталось, а не сколько было при построении
-            assert (
-                str(fic_trash.render())
-                == "Удалить работу и её главы (1)? Нажмите ещё раз"
+            assert "Удалить работу и её главы (1)? Нажмите ещё раз" in prompt(
+                chapters, TRASH_FIC_ID
             )
-            fic_trash.action_press()
+            await pilot.press("x")
             await pilot.pause()
             assert "закройте вкладку" in list(pilot.app._notifications)[-1].message
             assert (tmp_path / "fics" / "2" / "fic.json").exists()
@@ -1662,16 +1691,12 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
                 main.query_one(ChapterTab).id or ""
             )
 
-            # мышью по крестику; последняя глава - вся работа
-            trash = gone2.trash
-            trash.action_press()
-            await pilot.pause(0.05)
-            trash.action_press()
-            await pilot.pause()
+            # последняя глава - вся работа
+            await press_twice(pilot, "2", "2")
             assert [fic.id for fic, _ in storage.read_fics()[0]] == [FIC.id]
             assert len(list((tmp_path / "trash").glob("2-*/fic.json"))) == 1
             assert chapter_titles(main) == ["Глава"]
-            assert not main.query(".gone_section")
+            assert not any(e.gone_fic for e in tab.entries)
 
     asyncio.run(run())
 
@@ -1770,7 +1795,8 @@ def test_f6_changes_status(tmp_path, monkeypatch, before, action, presses):
         async with MainScreenApp(main).run_test() as pilot:
             await pilot.app.workers.wait_for_complete()
             await open_chapter(pilot, main)
-            # фокус в редакторе: у TextArea на f6 своя привязка
+            # фокус в разметке: у TextArea на f6 своя привязка
+            await pilot.press("f7")
             assert isinstance(main.focused, ChapterEditor)
             await pilot.press("f6")
             await pilot.pause()
@@ -1786,6 +1812,78 @@ def test_f6_changes_status(tmp_path, monkeypatch, before, action, presses):
             assert sent == [("00000000", action)]
             assert main.query_one(ChapterTab).site_status == 3 - before
             assert main.query_one(ChapterTab).check_action("status", ())
+
+    asyncio.run(run())
+
+
+def test_start_page_keys_search_and_recent(tmp_path):
+    """Фокус на работах, -> в главы, буквы ищут, 1 открывает последнюю главу."""
+    storage = ChapterStorage(tmp_path)
+    storage.write_fic(FIC, "author")
+    storage.write_draft(FIC.id, FIC.chapters[0].id, "Текст.")
+    storage.write_fic(
+        Fic("2", "Драконов долг", [SlimChapterInfo("3", "Пролог")]), "beta"
+    )
+    storage.write_draft("2", "3", "Пролог.")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            tab = main.query_one(StartPageTab)
+            fics = main.query_one(FicList)
+            assert main.focused is fics
+            # без открытых глав строки "Продолжить" нет
+            assert not main.query_one("#recent").display
+            assert not tab.check_action("recent", (0,))
+
+            await pilot.press("д", "р")
+            assert tab.needle == "др"
+            assert main.query_one("#fic_search").has_class("-open")
+            assert [o.id for o in fics.options if o.id] == ["beta/2"]
+            assert tab.shown and tab.shown.fic.id == "2"
+            await pilot.press("right")
+            assert main.focused is main.query_one(ChapterList)
+            await pilot.press("left")
+            assert main.focused is fics
+            await pilot.press("escape")
+            assert tab.needle == ""
+            assert not main.query_one("#fic_search").has_class("-open")
+            # курсор остался на той же работе
+            assert tab.shown and tab.shown.fic.id == "2"
+
+            await pilot.press("right", "enter")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert main.query_one(ChapterTab).chapter_id == "3"
+            assert storage.read_recent() == [("2", "3")]
+            await close_tab(pilot, main)
+            await pilot.press("f1")
+            assert main.query_one("#recent").display
+            await pilot.press("1")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            assert main.query_one(ChapterTab).chapter_id == "3"
+
+    asyncio.run(run())
+
+
+def test_recent_not_duplicated_by_parallel_calls(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_fic(FIC, "author")
+    storage.write_draft(FIC.id, FIC.chapters[0].id, "Текст.")
+    storage.add_recent(FIC.id, FIC.chapters[0].id)
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            tab = main.query_one(StartPageTab)
+            await asyncio.gather(*(tab.show_recent() for _ in range(3)))
+            await pilot.pause()
+            assert len(main.query(".recent_btn")) == 1
 
     asyncio.run(run())
 
@@ -1810,10 +1908,14 @@ def test_renamed_chapter_marked_on_start_page(tmp_path):
             await pilot.press("f2", "end", "!", "enter")
             assert main.query_one(ChapterTab).save()
             await pilot.pause()
-            [btn] = main.query(ChapterButton)
-            assert str(btn.render()) == "Глава! (название не отправлено)"
-            # пометка серая, как крестик удаления
-            [span] = btn.visual.spans  # type: ignore[union-attr]
+            assert chapter_titles(main) == ["Глава! (название не отправлено)"]
+            # и в "Продолжить"
+            [btn] = main.query(".recent_btn").results(ClickableLabel)
+            assert "Глава! (название не отправлено)" in str(btn.content)
+            # пометка серая
+            tab = main.query_one(StartPageTab)
+            [entry] = tab.entries
+            [span] = tab.chapter_label(entry, entry.rows[0]).spans
             assert str(span.style) == "$foreground-muted"
 
     asyncio.run(run())
@@ -1829,6 +1931,7 @@ def test_tag_keys_in_editor(tmp_path):
             await pilot.app.workers.wait_for_complete()
             await open_chapter(pilot, main)
             editor = main.query_one(ChapterTab).editor
+            await pilot.press("f7")
             assert main.focused is editor
             await pilot.press("tab")
             assert editor.text == "<tab>раз два"
@@ -2306,6 +2409,7 @@ def test_reader_panel_and_markup_error(tmp_path):
             await open_chapter(pilot, main)
             tab = main.query_one(ChapterTab)
             editor, panel = tab.editor, tab.panel
+            await pilot.press("f7")
             await pilot.pause()
             # панель без тегов, абзац под курсором - первый
             assert panel.render_line(0).text.rstrip() == "раз"
@@ -2375,6 +2479,7 @@ def test_reader_panel_follows_scroll(tmp_path):
             await open_chapter(pilot, main)
             tab = main.query_one(ChapterTab)
             editor, panel = tab.editor, tab.panel
+            await pilot.press("f7")
             await pilot.pause()
             # колёсико без движения курсора: наверху панели тот же абзац
             for y in (40, 41, 300):
@@ -2401,7 +2506,6 @@ def test_visual_editor(tmp_path):
             await open_chapter(pilot, main)
             tab = main.query_one(ChapterTab)
             editor, visual = tab.editor, tab.visual
-            await pilot.press("f7")
             await pilot.pause()
             assert visual.display and visual.has_focus and not editor.display
             # без тегов, скрытый пробел - точкой
@@ -2451,11 +2555,10 @@ def test_page_keys_move_by_paragraph(tmp_path):
             await pilot.app.workers.wait_for_complete()
             await open_chapter(pilot, main)
             editor = main.query_one(ChapterTab).editor
-            editor.focus()
-            # обе раскладки: разметка, потом WYSIWYG - пустая строка пропускается,
+            # обе раскладки: WYSIWYG, потом разметка - пустая строка пропускается,
             # PgDn с последнего абзаца - в конец, PgUp из середины - в начало абзаца
-            for mode in ("raw", "wysiwyg"):
-                if mode == "wysiwyg":
+            for mode in ("wysiwyg", "raw"):
+                if mode == "raw":
                     await pilot.press("f7")
                 editor.selection = Selection.cursor((0, 1))
                 ends = []
@@ -2480,8 +2583,7 @@ def test_visual_arrows_pass_tab(tmp_path):
             await pilot.app.workers.wait_for_complete()
             await open_chapter(pilot, main)
             editor = main.query_one(ChapterTab).editor
-            editor.focus()
-            await pilot.press("f7")
+            await pilot.pause()
             # отступ <tab> - четыре клетки, но одна позиция текста
             await pilot.press("right")
             assert editor.selection.end == (0, 5)
@@ -2490,6 +2592,60 @@ def test_visual_arrows_pass_tab(tmp_path):
             # Backspace после отступа стирает <tab> целиком
             await pilot.press("right", "backspace")
             assert editor.text == "аб"
+
+    asyncio.run(run())
+
+
+def test_visual_format_keys(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "раз два\nтри")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            editor = main.query_one(ChapterTab).editor
+            await pilot.pause()
+            # Ctrl+B оформляет выделение, второй раз - снимает; один шаг Ctrl+Z
+            await pilot.press("shift+right", "shift+right", "shift+right", "ctrl+b")
+            assert editor.text == "<b>раз</b> два\nтри"
+            await pilot.press("ctrl+b")
+            assert editor.text == "раз два\nтри"
+            await pilot.press("ctrl+z")
+            assert editor.text == "<b>раз</b> два\nтри"
+            # без выделения - уведомление, текст тот же
+            await pilot.press("end", "ctrl+t")
+            assert editor.text == "<b>раз</b> два\nтри"
+            # Ctrl+E выравнивает абзац под курсором; Enter в его конце -
+            # новый абзац за </center>, набранное в нём не по центру
+            await pilot.press("ctrl+e")
+            assert editor.text == "<center><b>раз</b> два</center>три"
+            await pilot.press("end", "enter", "x")
+            assert editor.text == "<center><b>раз</b> два</center>x\nтри"
+            # Tab - отступ <tab>
+            await pilot.press("tab")
+            assert editor.text == "<center><b>раз</b> два</center>x<tab>\nтри"
+
+    asyncio.run(run())
+
+
+def test_broken_markup_opens_raw(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "раз\nдва <b>три")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            tab = main.query_one(ChapterTab)
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            # без тегов не показать: разметка, курсор на ошибке
+            assert tab.editor.display and not tab.visual.display
+            assert main.focused is tab.editor
+            assert tab.editor.cursor_location[0] == 1
 
     asyncio.run(run())
 

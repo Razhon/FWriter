@@ -6,15 +6,14 @@ from textual.app import ComposeResult
 from textual.binding import ActiveBinding, Binding, BindingType
 from textual.containers import Horizontal
 from textual.screen import Screen
-from textual.widgets import Footer, Label, Tab, TabbedContent, Tabs
+from textual.widgets import Footer, Label, Tab, TabbedContent
 
 from ..core.api.client import FicbookAPI
 from ..core.api.models import Fic, Role, SlimChapterInfo, can_manage
-from ..core.storage import DATA_DIR, ChapterMeta, ChapterStorage
+from ..core.storage import DATA_DIR, ChapterStorage
 from ..secrets import SecretStorage
-from .api_errors import report_disk_error
 from .chapter import ChapterTab
-from .start_page import ChapterButton, FicCollapsible, NewChapterButton, StartPageTab
+from .start_page import FicList, StartPageTab
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +22,7 @@ class MainScreen(Screen):
     """Вкладки: стартовая и главы. Что делают с главой, решает сама ChapterTab."""
 
     CSS_PATH = "../tcss/main.tcss"
+    AUTO_FOCUS = "#start_list"
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("f1", "start_page", "Начало работы"),
@@ -65,10 +65,13 @@ class MainScreen(Screen):
         )
         self.refresh_bindings()
         self.show_info()
+        # и после закрытия вкладки главы: иначе фокус на Tabs, мимо клавиш списка
+        if self.query_one(TabbedContent).active == "start_page":
+            self.set_focus(self.query_one(FicList))
 
-    def on_chapter_tab_title_saved(self, message: ChapterTab.TitleSaved) -> None:
+    async def on_chapter_tab_title_saved(self, message: ChapterTab.TitleSaved) -> None:
         tab = message.tab
-        self.query_one(StartPageTab).show_title(tab.fic_id, tab.chapter_id)
+        await self.query_one(StartPageTab).show_title(tab.fic_id, tab.chapter_id)
 
     def on_chapter_tab_info_changed(self, message: ChapterTab.InfoChanged) -> None:
         if message.tab is self.query_one(TabbedContent).active_pane:
@@ -76,9 +79,12 @@ class MainScreen(Screen):
 
     async def on_chapter_tab_created(self, message: ChapterTab.Created) -> None:
         tab = message.tab
-        await self.query_one(StartPageTab).refresh_fic(
+        start = self.query_one(StartPageTab)
+        start.refresh_fic(
             tab.fic_id, SlimChapterInfo(tab.chapter_id, tab.title_input.value)
         )
+        # new-N в "Продолжить" больше не найдётся
+        await start.remember(tab.fic_id, tab.chapter_id)
 
     async def on_chapter_tab_dropped(self, message: ChapterTab.Dropped) -> None:
         await self.query_one(TabbedContent).remove_pane(message.tab.id or "")
@@ -94,9 +100,9 @@ class MainScreen(Screen):
         tabbed.active = "start_page"
         # фокус из скрытой вкладки главы вернул бы её обратно; сразу, а не focus():
         # иначе Hide успевает отдать фокус соседу на скрытой вкладке
-        self.set_focus(tabbed.query_one(Tabs))
+        self.set_focus(tabbed.query_one(FicList))
 
-    def on_chapter_button_open(self, message: ChapterButton.Open) -> None:
+    def on_start_page_tab_open_chapter(self, message: StartPageTab.OpenChapter) -> None:
         self.open_chapter(message.fic, message.chapter, message.role, message.on_site)
 
     # не exclusive: клик по другой главе не должен отменять открытие первой
@@ -143,26 +149,7 @@ class MainScreen(Screen):
         # фокус с нажатой главы на скрытой стартовой вкладке вернул бы её обратно;
         # сразу, а не focus(): иначе Hide отдаёт его соседней кнопке
         self.set_focus(tab.active)
-
-    async def on_new_chapter_button_create(
-        self, message: NewChapterButton.Create
-    ) -> None:
-        btn = message.button
-        # второе нажатие двойного клика: список уже перестроен, кнопка снята
-        if not btn.is_attached:
-            return
-        # номер - по строкам списка, вместе с удалёнными на сайте и не отправленными
-        title = f"Глава {btn.query_ancestor(FicCollapsible).chapter_count() + 1}"
-        try:
-            chapter_id = self.storage.new_chapter_id(btn.fic.id)
-            self.storage.write_chapter(btn.fic.id, chapter_id, ChapterMeta(title))
-            self.storage.write_draft(btn.fic.id, chapter_id, "")
-        except OSError as e:
-            report_disk_error(self, e, "Не удалось создать главу", btn.fic.id)
-            return
-        fic, role = btn.fic, btn.role
-        await self.query_one(StartPageTab).refresh_fic(fic.id)
-        self.open_chapter(fic, SlimChapterInfo(chapter_id, title), role, on_site=False)
+        await self.query_one(StartPageTab).remember(fic.id, chapter.id)
 
     # по полям, а не по id виджета: после создания на сайте chapter_id вкладки меняется
     def find_tab(self, fic_id: str, chapter_id: str) -> ChapterTab | None:

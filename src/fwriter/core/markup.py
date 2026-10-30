@@ -1,5 +1,6 @@
 import bisect
 import itertools
+import os
 import re
 from collections import Counter
 from collections.abc import Callable
@@ -402,11 +403,14 @@ class Reader:
         self.chunks: list[
             tuple[int, int]
         ] = []  # первая строка документа, первая в lines
+        self.open: list[bool] = []  # перед куском открыт тег
+        self.rows = 0
 
     def update(self, rows: list[str]) -> None:
         pieces: dict[tuple[str, tuple[str, ...], tuple[str, ...], bool], _Piece] = {}
         parsed: dict[tuple[str, bool], list[Tag] | None] = {}
-        self.lines, self.chunks = [], []
+        self.lines, self.chunks, self.open = [], [], []
+        self.rows = len(rows)
         inline: tuple[str, ...] = ()
         blocks: tuple[str, ...] = ()
         i = 0
@@ -438,6 +442,7 @@ class Reader:
             if piece.rows == 1:
                 pieces[key] = piece
             self.chunks.append((i, len(self.lines)))
+            self.open.append(bool(inline or blocks))
             self.lines.extend(piece.lines)
             inline, blocks = piece.inline, piece.blocks
             i += piece.rows
@@ -456,6 +461,18 @@ class Reader:
         end = self.chunks[c + 1][1] if c + 1 < len(self.chunks) else len(self.lines)
         n = bisect.bisect_right(self.lines, raw, start, end, key=lambda x: x.start)
         return max(0, min(n - 1, len(self.lines) - 1))
+
+    def span(self, first: int, last: int) -> tuple[int, int]:
+        """строки документа first..last, расширенные до строк, перед которыми не
+        открыт ни один тег: оформлению клавишей хватает разобрать их"""
+        c = bisect.bisect_right(self.chunks, first, key=lambda x: x[0]) - 1
+        while self.open[c]:
+            c -= 1
+        d = bisect.bisect_right(self.chunks, last, key=lambda x: x[0])
+        while d < len(self.chunks) and self.open[d]:
+            d += 1
+        end = self.chunks[d][0] if d < len(self.chunks) else self.rows
+        return self.chunks[c][0], end
 
     def _first_row(self, n: int) -> int:
         """первая строка документа у куска строки читателя n"""
@@ -1031,6 +1048,236 @@ def fix_tags(text: str, sel: tuple[int, int] | None = None) -> list[Edit]:
             edits.append((start, end, new))
     # склейка текста без тегов между ними может сделать из "<" и буквы новый тег
     return edits if check(apply(text, edits)) is None else []
+
+
+# клавиши оформления в WYSIWYG: text - кусок, на краях которого не открыт ни один тег
+
+CANT_FORMAT = (
+    "Так не оформить: выделение пересекает сноску или выровненный абзац. "
+    "Можно в режиме разметки (F7)"
+)
+
+
+def enter(row: str, col: int, last: bool) -> tuple[int, str]:
+    """Enter в строке документа: куда и что вставить. В конце выровненной строки
+    новый абзац начинается за </center> или </right>, как на сайте: если дальше
+    \n, пустая строка у читателя там уже есть, иначе её даёт \n за тегом"""
+    at = col
+    for start, end, name, closing in tag_list(row[col:]):
+        if col + start != at or not closing:
+            break
+        at = col + end
+        if name in BLOCK:
+            return at, "" if at == len(row) and not last else "\n"
+    return col, "\n"
+
+
+def _wrap(text: str, a: int, b: int, name: str) -> list[Edit] | None:
+    """пара тегов вокруг a..b; b, i, s, открытые на краях, закрываются перед
+    тегом и открываются за ним, чтобы теги не перепутались; None - край
+    пересекает сноску или блок"""
+    tags = tag_list(text)
+    for start, end, tag, closing in tags:
+        if start == a and (closing or tag in BLOCK):
+            a = end
+        if start == b and closing and tag in _STYLE:
+            b = end
+    b = max(a, b)
+    stack: list[str] = []
+    at_a: list[str] | None = None
+    at_b: list[str] = []
+    low = 0
+    inside: set[str] = set()
+    for start, _, tag, closing in [*tags, (len(text), len(text), "", False)]:
+        if at_a is None and start >= a:
+            at_a, low = list(stack), len(stack)
+        if start >= b:
+            at_b = list(stack)
+            break
+        if tag == "tab":
+            continue
+        if closing:
+            _drop_last(stack, tag)
+        else:
+            stack.append(tag)
+        if at_a is not None:
+            low = min(low, len(stack))
+            inside.add(tag)
+    assert at_a is not None
+    outer, moved_a, moved_b = at_a[:low], at_a[low:], at_b[low:]
+    if any(tag not in _STYLE for tag in moved_a + moved_b):
+        return None
+    # вложенная сноска у читателя не открывается, блок в сноске или блоке - тоже
+    kin = BLOCK if name in BLOCK else {name}
+    if "footnote" in outer or kin & (set(outer) | inside):
+        return None
+
+    def around(moved: list[str], tag: str) -> str:
+        closed = "".join(f"</{t}>" for t in reversed(moved))
+        return closed + tag + "".join(f"<{t}>" for t in moved)
+
+    return [
+        (a, a, around(moved_a, f"<{name}>")),
+        (b, b, around(moved_b, f"</{name}>")),
+    ]
+
+
+def _flip(text: str, a: int, b: int, name: str, on: bool) -> str:
+    """b, i или s у символов a..b, теги затронутых кусков заново через _retag()"""
+    out: list[str] = []
+    at = 0
+    for start, end, top, pieces, close in _chunks(text):
+        if end <= a or start >= b:
+            continue
+        pos: list[int] = []
+        k = start
+        for tag_start, tag_end, _, _ in tag_list(text[start:end]):
+            pos += range(k, start + tag_start)
+            k = start + tag_end
+        pos += range(k, end)
+        chars = [(ch, set(style)) for part, style in pieces for ch in part]
+        for p, (_, style) in zip(pos, chars, strict=True):
+            if a <= p < b:
+                if on:
+                    style.add(name)
+                else:
+                    style.discard(name)
+        out += (text[at:start], _retag(top, chars, close))
+        at = end
+    out.append(text[at:])
+    return "".join(out)
+
+
+def _footnote(text: str, chosen: list[tuple[int, int]], on: bool) -> str | None:
+    """сноска вокруг выбранных символов (строка читателя, позиция) - в каждой
+    строке отдельно; снять - убрать сноски, где есть выбранный символ"""
+    edits: list[Edit] = []
+    if on:
+        for _, group in itertools.groupby(chosen, key=lambda x: x[0]):
+            ps = [p for _, p in group]
+            wrapped = _wrap(text, ps[0], ps[-1] + 1, "footnote")
+            if wrapped is None:
+                return None
+            edits += wrapped
+        return apply(text, edits)
+    picked = {p for _, p in chosen}
+    stack: list[tuple[int, int]] = []
+    for start, end, tag, closing in tag_list(text):
+        if tag == "tab":
+            continue
+        if not closing:
+            stack.append((start, end))
+            continue
+        o_start, o_end = stack.pop()
+        if tag == "footnote" and any(o_end <= p < start for p in picked):
+            edits += [(o_start, o_end, ""), (start, end, "")]
+    return apply(text, edits)
+
+
+def _texts(lines: list[Line]) -> list[str]:
+    return ["".join(run.text for run in line.runs) for line in lines]
+
+
+def _align(text: str, lines: list[Line], n: int, name: str) -> str | None:
+    """выровнять строку читателя n; уже так выровнена - убрать выравнивание
+    у её блока целиком, иначе сменить его; абзацы у читателя не меняются"""
+    line = lines[n]
+    if line.align == "left":
+        wrapped = _wrap(text, line.start, line.end, name)
+        if wrapped is None:
+            return None
+        # </center>\n - лишняя пустая строка у читателя: тег встаёт вместо \n;
+        # перед пустой последней строкой так нельзя - она пропадёт
+        start, _, close = wrapped[1]
+        if text.startswith("\n", start):
+            eaten = apply(text, [wrapped[0], (start, start + 1, close)])
+            if _texts(layout(eaten)) == _texts(lines):
+                return eaten
+        return apply(text, wrapped)
+    stack: list[tuple[int, int, str]] = []
+    block: tuple[int, int, str] | None = None
+    for start, end, tag, closing in tag_list(text):
+        if block is None and start >= line.end:
+            block = next(t for t in reversed(stack) if t[2] in BLOCK)
+        if tag == "tab":
+            continue
+        if not closing:
+            stack.append((start, end, tag))
+            continue
+        if stack.pop() is not block:
+            continue
+        assert block is not None
+        if line.align != name:
+            edits = [(block[0], block[1], f"<{name}>"), (start, end, f"</{name}>")]
+            return apply(text, edits)
+        # тег блока разделял абзацы: на его место \n, если без него они склеятся
+        for o, c in itertools.product(("", "\n"), repeat=2):
+            new = apply(text, [(block[0], block[1], o), (start, end, c)])
+            if _texts(layout(new)) == _texts(lines):
+                return new
+        return None
+    raise AssertionError("блок без закрывающего тега")
+
+
+def _raws(line: Line) -> list[int]:
+    """сырые позиции символов текста строки, без отступа и скобок сноски"""
+    return [
+        run.raw + i
+        for run in line.runs
+        if not run.virtual
+        for i in range(len(run.text))
+    ]
+
+
+def _spot(lines: list[Line], raw: int) -> tuple[int, int]:
+    """строка читателя и сколько её символов текста до raw: не меняется,
+    когда меняются только теги"""
+    n = to_screen(lines, raw)[0]
+    return n, bisect.bisect_left(_raws(lines[n]), raw)
+
+
+def _unspot(lines: list[Line], n: int, k: int) -> int:
+    raws = _raws(lines[n])
+    return raws[k] if k < len(raws) else lines[n].end
+
+
+def toggle(text: str, a: int, b: int, name: str) -> tuple[Edit, int, int] | str:
+    """клавиша оформления: b, i, s, footnote - у выделения a..b, center и right -
+    у абзаца под a; уже оформлено - снять. Правка и новое выделение или почему нельзя"""
+    lines = layout(text)
+    if name in BLOCK:
+        new = _align(text, lines, to_screen(lines, a)[0], name)
+    else:
+        chosen = [
+            (n, p, run.style)
+            for n, line in enumerate(lines)
+            for run in line.runs
+            if not run.virtual and not run.hidden
+            for i in range(len(run.text))
+            if a <= (p := run.raw + i) < b
+        ]
+        if not chosen:
+            return "Выделите текст, который оформить"
+        on = not all(name in style for _, _, style in chosen)
+        if name == "footnote":
+            new = _footnote(text, [(n, p) for n, p, _ in chosen], on)
+        else:
+            new = _flip(text, a, b, name, on)
+    if new is None:
+        return CANT_FORMAT
+    if new == text:
+        return (
+            "Оформление задано снаружи сноски или выровненного абзаца: "
+            "снимите его в режиме разметки (F7)"
+        )
+    lo = len(os.path.commonprefix([text, new]))
+    tail = len(os.path.commonprefix([text[lo:][::-1], new[lo:][::-1]]))
+    new_lines = layout(new)
+    return (
+        (lo, len(text) - tail, new[lo : len(new) - tail]),
+        _unspot(new_lines, *_spot(lines, a)),
+        _unspot(new_lines, *_spot(lines, b)),
+    )
 
 
 def _untab(lines: list[str]) -> list[str]:

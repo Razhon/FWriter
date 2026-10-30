@@ -1,92 +1,148 @@
-StartPageTab {
-    align: center middle;
-}
-
-Rule {
-    color: $surface;
-}
-
 Label {
     margin: 1;
 }
 
-#greeting {
-    margin: 1 0 0 0;
-}
-
-#greeting_row {
-    height: auto;
-
-    .side {
-        width: 1fr;
-        margin: 1 0 0 1;
-    }
-}
-
-.fics_container {
-    content-align: center middle;
-    padding: 0 12;
-    overflow-y: auto;
-    scrollbar-background: #0b0b0b;
-}
-
-.fics_collapsibles_label {
-    margin: 1 1 1 1;
-}
-
-CollapsibleTitle, ClickableLabel {
-    width: 1fr;
-}
-
-/* отступы - padding, а не margin, как у Label: по ним тоже можно кликнуть */
-ClickableLabel {
+StartPageTab Label {
     margin: 0;
-    padding: 1 1 0 1;
 }
 
-.new_chapter_btn {
-    padding: 1;
-}
+/* стартовая вкладка: шапка, "Продолжить", слева работы, справа главы */
+#start_head {
+    height: 1;
+    background: $panel;
 
-.chapter_row {
-    height: auto;
+    Label {
+        padding: 0 1;
+    }
 
-    /* крестик сразу за названием, а не у правого края */
-    .chapter_btn {
+    #greeting {
+        width: 1fr;
+        text-style: bold;
+    }
+
+    #loading {
+        color: $text-muted;
+    }
+
+    ClickableLabel {
         width: auto;
+        margin-left: 1;
+        background: $panel-lighten-2;
+
+        &:hover, &:focus {
+            background: $accent;
+            color: $background;
+            text-style: none;
+        }
     }
 }
 
-.trash_btn {
-    width: auto;
-    color: $text-muted;
+#recent {
+    height: 1;
+    margin: 1 1 0 1;
+    display: none;
 
-    &.-armed {
-        color: $error;
+    .recent_head {
+        color: $text-muted;
+        padding-right: 1;
+    }
+
+    ClickableLabel {
+        width: auto;
+        padding: 0 1;
+        margin-right: 1;
+        background: $panel;
     }
 }
 
-Collapsible {
-    padding: 0;
-    border-top: none;
+#start_main {
+    height: 1fr;
 }
 
-CollapsibleTitle {
-    padding: 0 1 1 2;
-    border-top: hkey $background;
-    
+#start_left {
+    width: 44;
+    height: 1fr;
+    /* поиск поверх низа списка: список не сдвигается */
+    layers: base above;
+}
+
+#start_right {
+    width: 1fr;
+    padding: 0 1;
+}
+
+FicList, ChapterList {
+    height: 1fr;
+    border: round $panel-lighten-2;
+    border-title-style: bold;
+    border-subtitle-color: $text-muted;
+
     &:focus {
-        background: transparent;
-        color: $foreground;
-        text-style: underline;
+        border: round $accent;
     }
-    &:hover {
-        background: $block-hover-background;
+
+    & > .option-list--option {
+        padding: 0 1;
     }
 }
 
-Collapsible > Contents {
-    padding: 0 0 1 4;
+#fic_search {
+    layer: above;
+    dock: bottom;
+    width: 100%;
+    height: 3;
+    margin: 0 1 1 1;
+    padding: 0 1;
+    border: round $accent;
+    border-title-color: $accent;
+    border-subtitle-color: $text-muted;
+    background: $surface;
+    display: none;
+
+    &.-open {
+        display: block;
+    }
+}
+
+#fic_status {
+    height: 1;
+    margin: 1 0;
+
+    #fic_title {
+        padding: 0 1;
+        text-style: bold;
+    }
+
+    #fic_meta {
+        color: $text-muted;
+    }
+}
+
+#fic_role {
+    padding: 0 1;
+    background: $panel-lighten-1;
+    text-style: bold;
+    color: $background;
+
+    &.-author {
+        background: $primary;
+    }
+
+    &.-coauthor {
+        background: $secondary;
+    }
+
+    &.-beta {
+        background: $success;
+    }
+
+    &.-gamma {
+        background: $warning;
+    }
+
+    &.-gone {
+        background: $error;
+    }
 }
 
 /* footer и строка о главе справа в одну строку */

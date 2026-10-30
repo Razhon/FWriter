@@ -7,9 +7,18 @@ from textual.binding import Binding, BindingType
 from textual.geometry import Region, Size
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
-from textual.widgets.text_area import Selection
+from textual.widgets.text_area import Document, Selection
 
-from ..core.markup import Reader, Run, adds_tag, next_char, prev_char, strip_text
+from ..core.markup import (
+    Reader,
+    Run,
+    adds_tag,
+    enter,
+    next_char,
+    prev_char,
+    strip_text,
+    toggle,
+)
 from .editor import ChapterEditor
 from .layout import DASHES, ScreenLines, paragraph, run_style
 
@@ -56,7 +65,14 @@ class VisualEditor(ScrollView, can_focus=True):
         Binding("shift+pagedown", "paragraph(1, True)", show=False),
         Binding("backspace", "delete(False)", show=False),
         Binding("delete", "delete(True)", show=False),
-        Binding("enter", "insert('\\n')", show=False),
+        Binding("enter", "enter", show=False),
+        Binding("tab", "tab", show=False),
+        Binding("ctrl+b", "format('b')", show=False),
+        Binding("alt+i", "format('i')", show=False),
+        Binding("ctrl+t", "format('s')", show=False),
+        Binding("ctrl+e", "format('center')", show=False),
+        Binding("ctrl+r", "format('right')", show=False),
+        Binding("ctrl+n", "format('footnote')", show=False),
         Binding("ctrl+z", "undo", show=False),
         Binding("ctrl+y", "redo", show=False),
         Binding("ctrl+c", "copy", show=False),
@@ -83,6 +99,12 @@ class VisualEditor(ScrollView, can_focus=True):
     @property
     def rows(self) -> list[str]:
         return self.editor.document.lines
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # только для чтения tab уходит к экрану и переводит фокус, как у ChapterEditor
+        if action in ("tab", "format"):
+            return not self.editor.read_only
+        return super().check_action(action, parameters)
 
     def on_mount(self) -> None:
         self.watch(self.editor, "selection", self.selection_changed, init=False)
@@ -215,15 +237,18 @@ class VisualEditor(ScrollView, can_focus=True):
                 self.select(loc, extend)
                 return
 
-    def replace(self, text: str, start: Location, end: Location) -> bool:
-        """правка сырого текста; ввод, после которого появился бы тег, не принимается"""
+    def replace(
+        self, text: str, start: Location, end: Location, tags: bool = False
+    ) -> bool:
+        """правка сырого текста; ввод, после которого появился бы тег, не
+        принимается; tags - тег ставим мы сами (Tab)"""
         if self.editor.read_only:
             return False
         rows = self.rows
         old = "\n".join(rows[start[0] : end[0] + 1])
         cut = sum(len(r) + 1 for r in rows[start[0] : end[0]]) + end[1]
         new = old[: start[1]] + text + old[cut:]
-        if adds_tag(old, new):
+        if not tags and adds_tag(old, new):
             self.notify(
                 "Оформление - клавишами (F8), сами теги - в режиме разметки (F7)",
                 severity="warning",
@@ -242,8 +267,55 @@ class VisualEditor(ScrollView, can_focus=True):
         kept = strip_text(self.editor.get_text_range(start, end))
         return self.replace(text + kept, start, end)
 
-    def action_insert(self, text: str) -> None:
-        self.replace_selection(text)
+    def action_enter(self) -> None:
+        selection = self.editor.selection
+        if not selection.is_empty:
+            self.replace_selection("\n")
+            return
+        row, col = selection.end
+        at, text = enter(self.rows[row], col, row == len(self.rows) - 1)
+        if at == col:
+            self.replace(text, (row, col), (row, col))
+            return
+        # новый абзац за закрывающим тегом блока: курсор - в его начало
+        if text and not self.replace(text, (row, at), (row, at)):
+            return
+        self.select((row, at), False)
+
+    def action_tab(self) -> None:
+        start, end = sorted(self.editor.selection)
+        kept = strip_text(self.editor.get_text_range(start, end))
+        self.replace("<tab>" + kept, start, end, tags=True)
+
+    def action_format(self, name: str) -> None:
+        if not self.fresh():
+            return
+        start, end = sorted(self.editor.selection)
+        # кусок, на краях которого не открыт ни один тег: не вся глава
+        first, stop = self.reader.span(start[0], end[0])
+        # и следующая строка: </center> может встать вместо \n перед ней
+        rows = self.rows[first : stop + 1]
+
+        def index(loc: Location) -> int:
+            return sum(len(r) + 1 for r in rows[: loc[0] - first]) + loc[1]
+
+        result = toggle("\n".join(rows), index(start), index(end), name)
+        if isinstance(result, str):
+            self.notify(result, severity="warning")
+            return
+        (lo, hi, part), a, b = result
+        doc = self.editor.document
+        # без языка подсветки - всегда Document
+        assert isinstance(doc, Document)
+        base = doc.get_index_from_location((first, 0))
+        self.editor.apply_edits([(base + lo, base + hi, part)])
+        self.editor.selection = Selection(
+            doc.get_location_from_index(base + a),
+            doc.get_location_from_index(base + b),
+        )
+        self.stale = True
+        self.goal = None
+        self.call_after_refresh(self.show_cursor)
 
     def action_delete(self, forward: bool) -> None:
         if not self.fresh():

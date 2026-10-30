@@ -18,6 +18,9 @@ log = logging.getLogger(__name__)
 # appauthor=False: без лишней вложенной папки fwriter/fwriter в Windows
 DATA_DIR = Path(user_data_dir("fwriter", appauthor=False))
 
+# с запасом: часть глав могли удалить или отправить под новым id
+RECENT_KEEP = 10
+
 
 type Source = Literal["manual", "site", "publish"]
 type Decision = Literal["mine", "site", "both", "manual"]
@@ -193,6 +196,7 @@ class ChapterStorage:
     def __init__(self, root: Path) -> None:
         self.fics = root / "fics"
         self.trash = root / "trash"
+        self.recent = root / "recent.json"
         # shortcut: чтение-правка-запись fic.json и chapter.json без блокировки,
         # async-воркеры её не прервут; нужен lock, если звать из @work(thread=True)
 
@@ -433,6 +437,38 @@ class ChapterStorage:
         """Папку работы целиком, с fic.json и new-N, - в trash/."""
         return _trash(self._fic(fic_id), self.trash, fic_id)
 
+    def read_recent(self) -> list[tuple[str, str]]:
+        """Последние открытые главы (fic_id, chapter_id), свежие первыми.
+
+        Нет файла или он повреждён - пустой список: это только подсказка.
+        """
+        try:
+            data = json.loads(_read(self.recent))
+            if not isinstance(data, list):
+                return []
+            return [
+                (f, c) for f, c in data if isinstance(f, str) and isinstance(c, str)
+            ]
+        except FileNotFoundError:
+            return []
+        except OSError, ValueError, TypeError:
+            log.warning("recent.json не прочитан", exc_info=True)
+            return []
+
+    def add_recent(self, fic_id: str, chapter_id: str) -> None:
+        """Глава открыта: первой в списке; хранятся последние RECENT_KEEP."""
+        self._chapter(fic_id, chapter_id)  # те же проверки id, что у папок
+        rest = [e for e in self.read_recent() if e != (fic_id, chapter_id)]
+        _write(self.recent, _dump([[fic_id, chapter_id], *rest][:RECENT_KEEP]))
+
+    def drop_recent(self, fic_id: str, chapter_id: str) -> None:
+        """Главы больше нет под этим id; список только подсказка, сбой не страшен."""
+        rest = [e for e in self.read_recent() if e != (fic_id, chapter_id)]
+        try:
+            _write(self.recent, _dump(rest))
+        except OSError:
+            log.warning("recent.json не записан", exc_info=True)
+
     def rename_chapter(self, fic_id: str, old_id: str, new_id: str, title: str) -> None:
         """new-N -> id с сайта после создания главы; глава дописывается в fic.json.
 
@@ -454,3 +490,4 @@ class ChapterStorage:
             fic.chapters.append(SlimChapterInfo(new_id, title))
         self.write_fic(fic, role)
         self._chapter(fic_id, old_id).rename(new)
+        self.drop_recent(fic_id, old_id)

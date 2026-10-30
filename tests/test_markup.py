@@ -15,6 +15,7 @@ from fwriter.core.markup import (
     count,
     dashes,
     ellipsis,
+    enter,
     fix_tags,
     layout,
     next_char,
@@ -25,8 +26,10 @@ from fwriter.core.markup import (
     restyle,
     spaces,
     strip_text,
+    tag_list,
     to_raw,
     to_screen,
+    toggle,
     tweak_kind,
     typography,
     wrap,
@@ -249,6 +252,114 @@ def test_adds_tag(old, new, added):
 
 def test_strip_text():
     assert strip_text("a<b>bc</b>d\n<tab>e") == "<b></b>"
+
+
+@pytest.mark.parametrize(
+    ("text", "a", "b", "name", "result", "selected"),
+    [
+        ("ab cd ef", 3, 5, "b", "ab <b>cd</b> ef", "cd"),
+        ("ab <b>cd</b> ef", 6, 8, "b", "ab cd ef", "cd"),
+        # снять с части - тег разрывается
+        ("<b>abcdef</b>", 5, 7, "b", "<b>ab</b>cd<b>ef</b>", "cd"),
+        # частично оформленное выделение оформляется целиком
+        ("a<i>bc</i>d", 0, 3, "b", "<b>a</b><i>bc</i>d", "a"),
+        # в каждом абзаце отдельно
+        ("ab\ncd", 1, 4, "i", "a<i>b</i>\n<i>c</i>d", "b\nc"),
+        # сноска внутри <b>: теги не перепутаны
+        ("x<b>yz</b>w", 4, 5, "footnote", "x<b><footnote>y</footnote>z</b>w", "y"),
+        ("ab<footnote>cd</footnote>", 13, 14, "footnote", "abcd", "d"),
+        (
+            "a<center>b</center>c",
+            0,
+            20,
+            "footnote",
+            (
+                "<footnote>a</footnote><center><footnote>b</footnote></center>"
+                "<footnote>c</footnote>"
+            ),
+            "abc",
+        ),
+        # выравнивание: абзацы у читателя те же, без лишних пустых строк
+        ("A\nB\nC", 2, 2, "center", "A\n<center>B</center>C", ""),
+        ("A\n<center>B</center>C", 10, 10, "center", "A\nB\nC", ""),
+        ("A\n<center>B</center>C", 10, 10, "right", "A\n<right>B</right>C", ""),
+        ("<center>C</center>X", 8, 8, "center", "C\nX", ""),
+        ("<center>C</center>\nX", 8, 8, "center", "C\n\nX", ""),
+        # блок из нескольких абзацев - целиком
+        ("<center>a\nb</center>", 10, 10, "center", "a\nb", ""),
+    ],
+)
+def test_toggle(text, a, b, name, result, selected):
+    got = toggle(text, a, b, name)
+    assert not isinstance(got, str)
+    edit, na, nb = got
+    new = apply(text, [edit])
+    assert new == result
+    assert check(new) is None
+    # выделение на том же видимом тексте
+    part = new[na:nb]
+    tags = sorted((s, e) for s, e, _, _ in tag_list(part))
+    shown = "".join(
+        part[e:s] for (_, e), (s, _) in zip([(0, 0), *tags], [*tags, (len(part), 0)])
+    )
+    assert shown == selected
+
+
+def test_toggle_random():
+    def shown(text: str) -> list[str]:
+        lines = [
+            "".join(r.text for r in line.runs if not r.virtual) for line in layout(text)
+        ]
+        # пустые строки в конце главы читатель не увидит: F5 их обрежет
+        while len(lines) > 1 and not lines[-1]:
+            lines.pop()
+        return lines
+
+    rnd = random.Random(2)
+    names = ["b", "i", "s", "footnote", "center", "right"]
+    for _ in range(300):
+        words = [rnd.choice(["слово", "x", " ", "\n", "<tab>"]) for _ in range(12)]
+        text = "".join(words)
+        for _ in range(8):
+            a, b = sorted(rnd.randint(0, len(text)) for _ in range(2))
+            got = toggle(text, a, b, rnd.choice(names))
+            if isinstance(got, str):
+                continue
+            new = apply(text, [got[0]])
+            # теги не перепутаны, текст и абзацы у читателя те же
+            assert check(new) is None, (text, a, b, new)
+            assert shown(new) == shown(text), (text, a, b, new)
+            text = new
+
+
+def test_toggle_refused():
+    assert toggle("ab", 1, 1, "b") == "Выделите текст, который оформить"
+    # b снаружи блока изнутри не снять
+    assert "F7" in str(toggle("<b><center>x</center></b>", 11, 12, "b"))
+
+
+@pytest.mark.parametrize(
+    ("row", "col", "last", "result"),
+    [
+        # за блоком в конце главы пустой строки читателя нет - её даёт \n
+        ("<center>C</center>", 9, True, (18, "\n")),
+        # дальше \n: пустая строка уже есть
+        ("<center>C</center>", 9, False, (18, "")),
+        ("<center><b>C</b></center>X", 12, False, (25, "\n")),
+        ("<center>CD</center>", 9, False, (9, "\n")),
+        ("abc", 1, False, (1, "\n")),
+    ],
+)
+def test_enter(row, col, last, result):
+    assert enter(row, col, last) == result
+
+
+def test_reader_span():
+    reader = Reader()
+    reader.update(["a", "<b>b", "c</b>", "d", "<center>e</center>"])
+    assert reader.span(2, 2) == (1, 3)
+    assert reader.span(0, 1) == (0, 3)
+    assert reader.span(4, 4) == (4, 5)
 
 
 @pytest.mark.parametrize("text", MAP_TEXTS)

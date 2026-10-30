@@ -428,3 +428,39 @@ def test_trash_chapter_and_fic(tmp_path):
     assert storage.read_fics() == ([], [])
     with pytest.raises(FileNotFoundError):
         storage.trash_fic("1")
+
+
+def test_recent(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    assert storage.read_recent() == []
+    storage.add_recent("1", "2")
+    storage.add_recent("1", "new-1")
+    storage.add_recent("1", "2")
+    assert storage.read_recent() == [("1", "2"), ("1", "new-1")]
+    for n in range(20):
+        storage.add_recent("1", str(n))
+    assert len(storage.read_recent()) == 10
+    with pytest.raises(ValueError):
+        storage.add_recent("../1", "2")
+    # повреждённый файл - пустой список, а не ошибка
+    (tmp_path / "recent.json").write_text("[1, [2]]", encoding="utf-8")
+    assert storage.read_recent() == []
+
+
+def test_recent_not_a_list(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    (tmp_path / "recent.json").write_text('{"ab": 1}', encoding="utf-8")
+    assert storage.read_recent() == []
+
+
+def test_rename_chapter_drops_old_recent(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_fic(Fic("1", "Фик", []), "author")
+    storage.new_chapter_id("1")
+    storage.write_draft("1", "new-1", "текст")
+    storage.add_recent("1", "new-1")
+    storage.add_recent("1", "7")
+
+    storage.rename_chapter("1", "new-1", "500", "Новая")
+
+    assert storage.read_recent() == [("1", "7")]
