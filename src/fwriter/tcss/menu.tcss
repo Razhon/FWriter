@@ -1,4 +1,4 @@
-MenuScreen {
+MenuScreen, SettingsScreen {
     align: center middle;
 }
 
@@ -24,4 +24,8 @@ MenuScreen {
 
 #help {
     margin: 0 1 1 1;
+}
+
+#menu Checkbox {
+    margin-bottom: 1;
 }

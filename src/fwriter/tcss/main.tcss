@@ -226,7 +226,9 @@ ChapterTab {
 VisualEditor {
     width: 1fr;
     padding: 1 2;
-    overflow-y: scroll;
+    overflow-y: auto;
+    /* место под полосу всегда: иначе раскладка до её появления шире на 2 клетки */
+    scrollbar-gutter: stable;
     border: tall $border-blurred;
 
     &:focus {
@@ -260,7 +262,7 @@ ReaderPanel {
     width: 1fr;
     /* сверху и снизу - как рамка редактора: строки вровень */
     padding: 1 1;
-    overflow-y: scroll;
+    overflow-y: auto;
     border-left: vkey $foreground 20%;
 
     & > .reader-panel--footnote {

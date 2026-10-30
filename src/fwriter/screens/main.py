@@ -42,11 +42,19 @@ class MainScreen(Screen):
         """api None - офлайн: только локальные черновики."""
         self.api = api
         self.storage = storage or ChapterStorage(DATA_DIR)
+        # один словарь у всех вкладок: SettingsScreen меняет его на месте
+        self.settings, self.settings_ok = self.storage.read_settings()
         super().__init__()
+
+    def on_mount(self) -> None:
+        if not self.settings_ok:
+            self.notify(
+                "Файл настроек повреждён: все автозамены включены", severity="warning"
+            )
 
     def compose(self) -> ComposeResult:
         with TabbedContent():
-            yield StartPageTab(self.api, self.storage, self.is_open)
+            yield StartPageTab(self.api, self.storage, self.is_open, self.settings)
         with Horizontal(id="bottom_bar"):
             yield Footer()
             yield Label(id="chapter_info")
@@ -143,6 +151,7 @@ class MainScreen(Screen):
                 syncing=syncing,
                 publishable=not fic.readonly and (syncing or not on_site),
                 creates=not on_site,
+                settings=self.settings,
             )
             await tabbed.add_pane(tab)
         tabbed.active = tab.id or ""

@@ -20,6 +20,7 @@ from ..core.api.models import Fic, Role, SlimChapterInfo, can_manage
 from ..core.catalog import plan_fic
 from ..core.storage import ChapterMeta, ChapterStorage
 from .api_errors import report_api_error, report_disk_error
+from .settings import SettingsScreen
 from .widgets import CONFIRM_DELAY, ClickableLabel
 
 log = logging.getLogger(__name__)
@@ -196,14 +197,17 @@ class StartPageTab(TabPane):
         api: FicbookAPI | None,
         storage: ChapterStorage,
         is_open: Callable[[str, str | None], bool],
+        settings: dict[str, bool],
     ) -> None:
         """api None - офлайн: список работ из fic.json.
 
         is_open(fic_id, chapter_id) - открыта ли вкладка главы; chapter_id None - любой.
+        settings - флажки автозамены, общие со вкладками глав.
         """
         self.api = api
         self.storage = storage
         self.is_open = is_open
+        self.settings = settings
         # одно уведомление на загрузку, а не на каждый fic.json
         self.write_failed = False
         self.entries: list[FicEntry] = []
@@ -679,8 +683,7 @@ class StartPageTab(TabPane):
 
     @on(ClickableLabel.Pressed, ".settings_btn")
     def action_settings(self) -> None:
-        # shortcut: настраивать пока нечего; SettingsScreen - вместе с автозаменой (3.5)
-        self.notify("Настройки появятся вместе с автозаменой")
+        self.app.push_screen(SettingsScreen(self.storage, self.settings))
 
     @on(ClickableLabel.Pressed, ".relogin_btn")
     def on_relogin_pressed(self) -> None:

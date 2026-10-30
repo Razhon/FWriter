@@ -75,7 +75,7 @@ class ChapterTab(TabPane):
         Binding("f5", "publish", "Отправить"),
         Binding("f6", "status", "Статус"),
         Binding("f7", "mode", "Режим"),
-        Binding("f8", "help", "Оформление"),
+        Binding("f8", "help", "Справка"),
         Binding("f9", "tweaks", "Твики"),
         Binding("escape", "hide_title", show=False),
     ]
@@ -131,6 +131,7 @@ class ChapterTab(TabPane):
         text: str | None,
         title: str,
         title_editable: bool,
+        settings: dict[str, bool],
         readonly: bool = False,
         syncing: bool = False,
         publishable: bool = False,
@@ -141,6 +142,7 @@ class ChapterTab(TabPane):
         syncing: синхронизация при монтировании, правки закрыты до synced().
         publishable: главу можно отправить по F5.
         creates: главы нет на сайте (new-N или удалена там), F5 создаст её.
+        settings: флажки автозамены.
         """
         self.api = api
         self.storage = storage
@@ -170,7 +172,7 @@ class ChapterTab(TabPane):
         self.reader = Reader()
         self.editor = ChapterEditor()
         self.panel = ReaderPanel(self.reader)
-        self.visual = VisualEditor(self.editor, self.reader)
+        self.visual = VisualEditor(self.editor, self.reader, settings)
         # WYSIWYG по умолчанию; с ошибкой разметки show_error() переключит на F7
         self.editor.display = self.panel.display = False
         self.markup_error = Static(id="markup_error")

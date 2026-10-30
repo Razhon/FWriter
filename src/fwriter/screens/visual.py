@@ -10,13 +10,18 @@ from textual.strip import Strip
 from textual.widgets.text_area import Document, Selection
 
 from ..core.markup import (
+    BLOCK,
+    CANT_FORMAT,
     Reader,
     Run,
     adds_tag,
+    autocorrect,
+    check,
     enter,
     next_char,
     prev_char,
     strip_text,
+    tag_list,
     toggle,
 )
 from .editor import ChapterEditor
@@ -83,9 +88,15 @@ class VisualEditor(ScrollView, can_focus=True):
         Binding("ctrl+v", "paste", show=False),
     ]
 
-    def __init__(self, editor: ChapterEditor, reader: Reader) -> None:
+    def __init__(
+        self, editor: ChapterEditor, reader: Reader, settings: dict[str, bool]
+    ) -> None:
+        """settings - флажки автозамены, общий словарь с SettingsScreen"""
         super().__init__()
         self.editor = editor
+        self.settings = settings
+        # курсор сразу после автозамены: Backspace там откатывает её
+        self.fixed: Location | None = None
         self.screen_lines = ScreenLines(reader, hidden="·")
         # наш ввод уже в тексте, а Reader обновит только Changed: до него
         # клавиши сами пересобирают Reader, иначе курсор встал бы по старому тексту
@@ -113,6 +124,7 @@ class VisualEditor(ScrollView, can_focus=True):
         self.watch(self.editor, "selection", self.selection_changed, init=False)
 
     def selection_changed(self) -> None:
+        self.fixed = None
         self.refresh()
 
     def relayout(self) -> None:
@@ -122,7 +134,8 @@ class VisualEditor(ScrollView, can_focus=True):
         self.laid = width > 0
         if not self.laid:
             return
-        self.screen_lines.relayout(width)
+        # клетка справа - для курсора в конце полной строки
+        self.screen_lines.relayout(max(width - 1, 1))
         self.virtual_size = Size(width, self.screen_lines.tops[-1])
         self.refresh()
 
@@ -169,15 +182,29 @@ class VisualEditor(ScrollView, can_focus=True):
             y, x = lines.cell(n, c)
             self.goal = x if self.goal is None else self.goal
             y += 1 if where == "down" else -1
-            if 0 <= y < lines.tops[-1]:
-                self.select(self.to_location(y, self.goal), extend)
+            x = self.goal
+            # на краю документа - в его начало или конец, как у TextArea
+            if y < 0:
+                y, x = 0, 0
+            elif y >= lines.tops[-1]:
+                y, x = lines.tops[-1] - 1, 1 << 30
+            self.select(self.to_location(y, x), extend)
             return
         self.goal = None
         if where in ("left", "right"):
             self.step(n, c, -1 if where == "left" else 1, extend)
             return
         elif where in ("home", "end"):
-            _, a, b, _ = lines.row(lines.cell(n, c)[0])
+            y = lines.cell(n, c)[0]
+            _, a, b, _ = lines.row(y)
+            # End, который никуда не сдвинет, - в конец следующей строки
+            here = self.editor.selection.end
+            if (
+                where == "end"
+                and self.reader.location(self.rows, n, b) == here
+                and y + 1 < lines.tops[-1]
+            ):
+                n, a, b, _ = lines.row(y + 1)
             c = a if where == "home" else b
         elif where == "word_left" and c == 0:
             n, c = n - 1, -1
@@ -324,23 +351,78 @@ class VisualEditor(ScrollView, can_focus=True):
         if not self.fresh():
             return
         selection = self.editor.selection
+        if not forward and selection == Selection.cursor(self.fixed or (-1, 0)):
+            self.action_undo()
+            return
         if not selection.is_empty:
             self.replace_selection("")
             return
         row, col = selection.end
         n, c = self.reader.locate(self.rows, row, col)
         size = len(self.screen_lines.text(n))
+        # в начале выровненного блока Backspace сначала снимает выравнивание,
+        # внутри блока склеивает строки как обычно
+        align = self.reader.lines[n].align
+        if (
+            not forward
+            and c == 0
+            and align != "left"
+            and self.reader.span(row, row)[0] == row
+        ):
+            self.action_format(align)
+            return
         line = self.rows[row]
         span = next_char(line, col) if forward else prev_char(line, col)
         if span is None:
             # до края строки документа только теги: стираем перевод строки
             if forward and row + 1 < len(self.rows):
-                self.replace("", (row, len(line)), (row + 1, 0))
+                if self.replace("", (row, len(line)), (row + 1, 0)):
+                    self.editor.selection = Selection.cursor((row, col))
             elif not forward and row > 0:
                 self.replace("", (row - 1, len(self.rows[row - 1])), (row, 0))
         # символ за краем строки читателя (за </center>) - другой абзац у читателя
         elif (c < size) if forward else (c > 0):
             self.replace("", (row, span[0]), (row, span[1]))
+        elif forward:
+            # Del в конце строки читателя - Backspace в начале следующей
+            self.editor.selection = Selection.cursor(
+                self.reader.location(self.rows, n + 1, 0)
+            )
+            self.fixed = None
+            self.action_delete(False)
+            self.editor.selection = Selection.cursor((row, col))
+        else:
+            self.join_block(row, col, span[1])
+
+    def join_block(self, row: int, col: int, start: int) -> None:
+        """Backspace за закрывающим тегом блока: тег уходит в конец строки
+        читателя, и она становится концом блока"""
+        line = self.rows[row]
+        tags = tag_list(line)
+        moved = [
+            (s, e)
+            for s, e, name, closing in tags
+            if closing and name in BLOCK and start <= s and e <= col
+        ]
+        if not moved:
+            return
+        end = next(
+            (s for s, _, name, _ in tags if s >= col and name in BLOCK), len(line)
+        )
+        ends = "".join(line[s:e] for s, e in moved)
+        kept = line[start:col]
+        for s, e in reversed(moved):
+            kept = kept[: s - start] + kept[e - start :]
+        new = line[:start] + kept + line[col:end] + ends + line[end:]
+        first, stop = self.reader.span(row, row)
+        rows = self.rows[first:stop]
+        joined = rows[: row - first] + [new] + rows[row - first + 1 :]
+        # тег мог встать внутрь <b>, открытого до него
+        if check("\n".join(joined)) and not check("\n".join(rows)):
+            self.notify(CANT_FORMAT, severity="warning")
+            return
+        if self.replace(new[start:end], (row, start), (row, end), tags=True):
+            self.editor.selection = Selection.cursor((row, col - len(ends)))
 
     def action_delete_word(self) -> None:
         if not self.fresh():
@@ -387,7 +469,23 @@ class VisualEditor(ScrollView, can_focus=True):
         if event.is_printable and event.character:
             event.stop()
             event.prevent_default()
-            self.replace_selection(event.character)
+            if self.replace_selection(event.character):
+                self.autocorrect()
+
+    def autocorrect(self) -> None:
+        """замена только что набранного; Ctrl+Z или Backspace сразу после - назад"""
+        row, col = self.editor.selection.end
+        on = [key for key, value in self.settings.items() if value]
+        if (edit := autocorrect(self.rows[row], col, on)) is None:
+            return
+        a, b, text = edit
+        history = self.editor.history
+        # отдельным шагом Ctrl+Z, и следующий ввод к ней не приклеится
+        history.checkpoint()
+        self.replace(text, (row, a), (row, b), tags=True)
+        history.checkpoint()
+        self.editor.selection = Selection.cursor((row, col + len(text) - (b - a)))
+        self.fixed = self.editor.selection.end
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         if (offset := event.get_content_offset(self)) is None:

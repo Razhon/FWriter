@@ -8,7 +8,7 @@ from rich.style import Style
 from textual.app import App
 from textual.content import Content
 from textual.geometry import Offset
-from textual.widgets import Input, Label, Log, OptionList, TabbedContent
+from textual.widgets import Checkbox, Input, Label, Log, OptionList, TabbedContent
 from textual.widgets.text_area import Selection
 
 from fwriter.core.api.client import FicbookAPI
@@ -47,6 +47,7 @@ from fwriter.screens.editor import ChapterEditor
 from fwriter.screens.layout import ScreenLines, breaks
 from fwriter.screens.menu import HelpScreen, MenuScreen
 from fwriter.screens.merge import MergeScreen
+from fwriter.screens.settings import SettingsScreen
 from fwriter.screens.start_page import (
     FIC_SECTIONS,
     NEW_ID,
@@ -1862,7 +1863,11 @@ def test_start_page_keys_search_and_recent(tmp_path):
             await close_tab(pilot, main)
             await pilot.press("f1")
             assert main.query_one("#recent").display
-            await pilot.press("1")
+            # в начатом поиске цифра - часть строки, а не "Продолжить"
+            await pilot.press("left", "д", "1")
+            assert tab.needle == "д1"
+            assert not main.query(ChapterTab)
+            await pilot.press("escape", "1")
             await pilot.app.workers.wait_for_complete()
             await pilot.pause()
             assert main.query_one(ChapterTab).chapter_id == "3"
@@ -2516,6 +2521,9 @@ def test_visual_editor(tmp_path):
             assert editor.document.lines[0] == "<b>разx</b>  — два"
             await pilot.press("end", "!")
             assert editor.document.lines[0] == "<b>разx</b>  — два!"
+            # End в конце абзаца - в конец следующего
+            await pilot.press("end")
+            assert editor.selection == Selection.cursor((1, 3))
             # Backspace в начале строки соединяет абзацы, теги не трогает
             await pilot.press("down", "home", "backspace")
             assert editor.text == "<b>разx</b>  — два!три"
@@ -2537,6 +2545,11 @@ def test_visual_editor(tmp_path):
             assert editor.selection == Selection.cursor((0, 4))
             await pilot.press("shift+right")
             assert editor.selection == Selection((0, 4), (0, 5))
+            # ↑ на первой строке - в начало текста (после <b>), ↓ на последней - в конец
+            await pilot.press("up")
+            assert editor.selection == Selection.cursor((0, 3))
+            await pilot.press("down", "down")
+            assert editor.selection.end == (0, len(editor.text))
             # F7 обратно: курсор на том же месте текста
             loc = editor.selection
             await pilot.press("f7")
@@ -2626,7 +2639,7 @@ def test_visual_format_keys(tmp_path):
             # новый абзац за </center>, набранное в нём не по центру
             await pilot.press("ctrl+e")
             assert editor.text == "<center><b>раз</b> два</center>три"
-            await pilot.press("end", "enter", "x")
+            await pilot.press("enter", "x")
             assert editor.text == "<center><b>раз</b> два</center>x\nтри"
             # Tab - отступ <tab>
             await pilot.press("tab")
@@ -2717,5 +2730,117 @@ def test_visual_editor_delete_word(tmp_path):
             editor.selection = Selection.cursor((1, 7))
             await pilot.press("ctrl+w")
             assert editor.text == "<center>раз</center>\nдва три"
+
+    asyncio.run(run())
+
+
+def test_visual_backspace_unaligns(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "раз\n<center></center>\nдва")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            editor = main.query_one(ChapterTab).editor
+            await pilot.pause()
+            # Backspace в пустом центрованном абзаце снимает центровку, потом стирает строку
+            editor.selection = Selection.cursor((1, 8))
+            await pilot.press("backspace")
+            assert editor.text == "раз\n\n\nдва"
+            await pilot.press("backspace")
+            assert editor.text == "раз\n\nдва"
+            # внутри блока из нескольких строк - склеивает, центровка остаётся
+            editor.text = "<center>а\nб</center>"
+            editor.selection = Selection.cursor((1, 0))
+            await pilot.press("backspace")
+            assert editor.text == "<center>аб</center>"
+
+    asyncio.run(run())
+
+
+def test_visual_delete_joins_block(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "<center>раз</center><b>два</b>")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            editor = main.query_one(ChapterTab).editor
+            await pilot.pause()
+            # Backspace за </center> забирает строку в центрованный абзац
+            editor.selection = Selection.cursor((0, 20))
+            await pilot.press("backspace")
+            assert editor.text == "<center>раз<b>два</b></center>"
+            assert editor.selection.end == (0, 11)
+            # Del в конце абзаца - то же; курсор остаётся на месте
+            editor.text = "<center>раз</center>\nдва"
+            editor.selection = Selection.cursor((0, 11))
+            await pilot.press("delete")
+            assert editor.text == "<center>раз</center>два"
+            await pilot.press("delete")
+            assert editor.text == "<center>раздва</center>"
+            assert editor.selection.end == (0, 11)
+            # тег не встаёт внутрь <b> из нескольких строк
+            editor.text = "<center>раз</center><b>два\nтри</b>"
+            editor.selection = Selection.cursor((0, 23))
+            await pilot.press("backspace")
+            assert editor.text == "<center>раз</center><b>два\nтри</b>"
+
+    asyncio.run(run())
+
+
+def test_visual_autocorrect(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            editor = main.query_one(ChapterTab).editor
+            await pilot.pause()
+            await pilot.press("a", "-", "-")
+            assert editor.text == "a—"
+            # Ctrl+Z сразу после - набранное
+            await pilot.press("ctrl+z")
+            assert editor.text == "a--"
+            await pilot.press("backspace", "backspace", "space", "quotation_mark", "b")
+            assert editor.text == "a «b"
+            # Backspace сразу после - тоже набранное, дальше стирает как обычно
+            await pilot.press("quotation_mark")
+            assert editor.text == "a «b»"
+            await pilot.press("backspace")
+            assert editor.text == 'a «b"'
+            await pilot.press("backspace")
+            assert editor.text == "a «b"
+            # выключенная в настройках замена не делается
+            main.settings["ellipsis"] = False
+            await pilot.press("full_stop", "full_stop", "full_stop")
+            assert editor.text == "a «b..."
+
+    asyncio.run(run())
+
+
+def test_settings_screen(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await pilot.press("f7")
+            screen = pilot.app.screen
+            assert isinstance(screen, SettingsScreen)
+            screen.query_one("#quotes", Checkbox).toggle()
+            await pilot.pause()
+            assert main.settings["quotes"] is False
+            assert storage.read_settings()[0]["quotes"] is False
+            await pilot.press("escape")
+            assert pilot.app.screen is main
 
     asyncio.run(run())

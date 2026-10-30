@@ -12,6 +12,7 @@ from typing import Literal, get_args
 from platformdirs import user_data_dir
 
 from .api.models import Fic, Role, SlimChapterInfo
+from .markup import AUTOCORRECT
 
 log = logging.getLogger(__name__)
 
@@ -197,6 +198,7 @@ class ChapterStorage:
         self.fics = root / "fics"
         self.trash = root / "trash"
         self.recent = root / "recent.json"
+        self.settings = root / "settings.json"
         # shortcut: чтение-правка-запись fic.json и chapter.json без блокировки,
         # async-воркеры её не прервут; нужен lock, если звать из @work(thread=True)
 
@@ -468,6 +470,30 @@ class ChapterStorage:
             _write(self.recent, _dump(rest))
         except OSError:
             log.warning("recent.json не записан", exc_info=True)
+
+    def read_settings(self) -> tuple[dict[str, bool], bool]:
+        """Флажки автозамены (AUTOCORRECT): нет файла или ключа - включено.
+
+        Второе - False, если файл повреждён: тогда все включены.
+        """
+        settings = dict.fromkeys(AUTOCORRECT, True)
+        try:
+            data = json.loads(_read(self.settings))
+            if not isinstance(data, dict):
+                raise TypeError("settings.json не объект")
+            for key in AUTOCORRECT:
+                if not _opt(data.get(key), bool):
+                    raise TypeError(f"settings.json: {key} не bool")
+                settings[key] = data.get(key) is not False
+        except FileNotFoundError:
+            return settings, True
+        except OSError, ValueError, TypeError:
+            log.warning("settings.json не прочитан", exc_info=True)
+            return dict.fromkeys(AUTOCORRECT, True), False
+        return settings, True
+
+    def write_settings(self, settings: dict[str, bool]) -> None:
+        _write(self.settings, _dump(settings))
 
     def rename_chapter(self, fic_id: str, old_id: str, new_id: str, title: str) -> None:
         """new-N -> id с сайта после создания главы; глава дописывается в fic.json.

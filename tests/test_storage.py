@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from fwriter.core.api.models import Fic, SlimChapterInfo
+from fwriter.core.markup import AUTOCORRECT
 from fwriter.core.storage import (
     ChapterMeta,
     ChapterStorage,
@@ -464,3 +465,19 @@ def test_rename_chapter_drops_old_recent(tmp_path):
     storage.rename_chapter("1", "new-1", "500", "Новая")
 
     assert storage.read_recent() == [("1", "7")]
+
+
+def test_settings(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    on = dict.fromkeys(AUTOCORRECT, True)
+    # нет файла - все включены
+    assert storage.read_settings() == (on, True)
+    storage.write_settings({**on, "quotes": False})
+    assert storage.read_settings() == ({**on, "quotes": False}, True)
+    # нет ключа - включено
+    (tmp_path / "settings.json").write_text('{"dash": false}', encoding="utf-8")
+    assert storage.read_settings() == ({**on, "dash": False}, True)
+    # повреждённый файл - все включены и пометка
+    for bad in ("{", "[]", '{"dash": 1}'):
+        (tmp_path / "settings.json").write_text(bad, encoding="utf-8")
+        assert storage.read_settings() == (on, False)

@@ -3,7 +3,7 @@ import itertools
 import os
 import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Literal
@@ -619,11 +619,15 @@ def _units(text: str) -> list[_Unit]:
     start = ti = 0
     for nl in [*(m.start() for m in re.finditer("\n", text)), len(text)]:
         while ti < len(tags) and tags[ti][0] < nl:
-            _, _, name, closing = tags[ti]
+            _, tag_end, name, closing = tags[ti]
             ti += 1
             if name in BLOCK:
                 fixed = True
                 blocks += -1 if closing else 1
+                # как на сайте: за </center> или </right> уже новая строка
+                if not blocks and not footnote:
+                    units.append(_Unit(start, tag_end, "fixed"))
+                    start, fixed = tag_end, False
             elif name == "footnote":
                 footnote = not closing
         if blocks > 0 or footnote:
@@ -815,6 +819,11 @@ def _quotes_rule(s: str) -> list[Edit] | None:
     """None, если прямых кавычек нечётное число"""
     if s.count('"') % 2:
         return None
+    return _quote_marks(s)
+
+
+def _quote_marks(s: str) -> list[Edit]:
+    """каждая прямая кавычка - открывающая или закрывающая по соседям"""
     out: list[Edit] = []
     stack: list[str] = []
     opened = False  # предыдущий символ - открывающая кавычка
@@ -929,6 +938,47 @@ def typography(
 ) -> tuple[list[Edit], list[int]]:
     """пункты 5-8 одной правкой"""
     return _typography(text, sel, edges=True)
+
+
+# автозамена при вводе (3.5): ключи settings.json
+AUTOCORRECT: tuple[str, ...] = ("dash", "space_dash", "quotes", "ellipsis")
+
+
+def autocorrect(row: str, col: int, on: Collection[str]) -> Edit | None:
+    """правка строки документа после символа, набранного перед col; on - какие
+    замены включены"""
+    p = _plain_lines(row, None)[0]
+    ends = [*p.offs[1:], len(p.text)]
+    k = next(
+        (
+            o + col - r
+            for o, r, e in zip(p.offs, p.raws, ends, strict=True)
+            if 0 <= r < col <= r + e - o
+        ),
+        None,
+    )
+    if k is None:
+        return None
+    s = p.text[:k]
+    found: Edit | None = None
+    if s.endswith("--") and "dash" in on:
+        found = (k - 2, k, "—")
+    elif (
+        s.endswith("- ")
+        and s[-3:-2] in ("", " ", "\t", "\xa0")
+        and not p.block  # как у твика: в блоке это скорее разделитель - - -
+        and "space_dash" in on
+    ):
+        found = (k - 2, k - 1, "—")
+    elif s.endswith("...") and s[-4:-3] not in (".", "?", "!") and "ellipsis" in on:
+        found = (k - 3, k, "…")
+    elif s.endswith('"') and "quotes" in on:
+        marks = _quote_marks(p.text[: k + 1])
+        found = next((m for m in marks if m[0] == k - 1), None)
+    if found is None:
+        return None
+    edits = _to_raw(p, *found)
+    return edits[0] if edits else None
 
 
 # починка тегов: b, i, s заново по стилю каждого символа
@@ -1219,6 +1269,25 @@ def _align(text: str, lines: list[Line], n: int, name: str) -> str | None:
     raise AssertionError("блок без закрывающего тега")
 
 
+def _align_all(text: str, lines: list[Line], a: int, b: int, name: str) -> str | None:
+    """выровнять непустые строки читателя под выделением a..b; все уже так
+    выровнены - снять"""
+    first = to_screen(lines, a)[0]
+    last = to_screen(lines, max(a, b - 1))[0]
+    texts = _texts(lines)
+    rows = [n for n in range(first, last + 1) if texts[n]] or [first]
+    on = not all(lines[n].align == name for n in rows)
+    for n in rows:
+        # снятый блок мог снять и следующие строки
+        if (lines[n].align == name) == on:
+            continue
+        new = _align(text, lines, n, name)
+        if new is None:
+            return None
+        text, lines = new, layout(new)
+    return text
+
+
 def _raws(line: Line) -> list[int]:
     """сырые позиции символов текста строки, без отступа и скобок сноски"""
     return [
@@ -1243,10 +1312,10 @@ def _unspot(lines: list[Line], n: int, k: int) -> int:
 
 def toggle(text: str, a: int, b: int, name: str) -> tuple[Edit, int, int] | str:
     """клавиша оформления: b, i, s, footnote - у выделения a..b, center и right -
-    у абзаца под a; уже оформлено - снять. Правка и новое выделение или почему нельзя"""
+    у абзацев под a..b; уже оформлено - снять. Правка и новое выделение или почему нельзя"""
     lines = layout(text)
     if name in BLOCK:
-        new = _align(text, lines, to_screen(lines, a)[0], name)
+        new = _align_all(text, lines, a, b, name)
     else:
         chosen = [
             (n, p, run.style)

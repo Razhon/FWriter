@@ -5,12 +5,14 @@ import random
 import pytest
 
 from fwriter.core.markup import (
+    AUTOCORRECT,
     TAB_WIDTH,
     TAGS,
     MarkupError,
     Reader,
     adds_tag,
     apply,
+    autocorrect,
     check,
     count,
     dashes,
@@ -287,6 +289,26 @@ def test_strip_text():
         ("<center>C</center>\nX", 8, 8, "center", "C\n\nX", ""),
         # блок из нескольких абзацев - целиком
         ("<center>a\nb</center>", 10, 10, "center", "a\nb", ""),
+        # выделение на несколько абзацев - все, пустые не трогаем
+        (
+            "A\n\nB\nC",
+            0,
+            5,
+            "center",
+            "<center>A</center>\n<center>B</center>C",
+            "A\nB",
+        ),
+        (
+            "<center>A</center>B",
+            8,
+            19,
+            "center",
+            "<center>A</center><center>B</center>",
+            "AB",
+        ),
+        ("<center>A</center><center>B</center>", 8, 27, "center", "A\nB", "A\nB"),
+        # конец выделения в начале строки её не касается
+        ("A\nB", 0, 2, "right", "<right>A</right>B", "A"),
     ],
 )
 def test_toggle(text, a, b, name, result, selected):
@@ -435,6 +457,17 @@ def test_restyle_after_center_no_extra_blank():
     # у читателя после </center> уже пустая строка: абзац рядом с блоком не трогаем
     text = "<center>***</center>\nРаз.\nДва."
     assert apply(text, restyle(text, "blank")) == "<center>***</center>\nРаз.\n\nДва."
+
+
+def test_restyle_para_glued_to_block_end():
+    # выравнивание в WYSIWYG съедает \n за </center>: абзац идёт сразу за тегом
+    text = "<center>***</center><tab>Раз.\n\n<tab>Два."
+    assert para_style(text) == "indent_blank"
+    out = apply(text, restyle(text, "blank"))
+    assert out == "<center>***</center>Раз.\n\nДва."
+    assert (
+        apply(out, restyle(out, "indent")) == "<center>***</center><tab>Раз.\n<tab>Два."
+    )
 
 
 def test_restyle_selection():
@@ -725,3 +758,33 @@ def test_tweak_kind(old, new, last, kind):
 )
 def test_wrap(text: str, sel: tuple[int, int], expected: str):
     assert apply(text, wrap(text, sel, "b")) == expected
+
+
+@pytest.mark.parametrize(
+    ("row", "col", "edit"),
+    [
+        ("a--", 3, (1, 3, "—")),
+        ("- ", 2, (0, 1, "—")),
+        ("<tab>- ", 7, (5, 6, "—")),
+        ("а - ", 4, (2, 3, "—")),
+        ("а- ", 3, None),  # дефис после слова
+        ("<center>- </center>", 10, None),  # разделитель сцены
+        ("ну...", 5, (2, 5, "…")),
+        ("ну?..", 5, None),
+        ("ну?...", 6, None),
+        ('"', 1, (0, 1, "«")),
+        ('а "б"', 5, (4, 5, "»")),
+        ('«а "', 4, (3, 4, "„")),
+        ('«а „б"', 6, (5, 6, "“")),
+        ('(<footnote>"', 12, (11, 12, "«")),
+        ("<b>-</b>-", 9, None),  # через тег не заменяется
+        ("a--b", 3, (1, 3, "—")),  # набрано в середине строки
+    ],
+)
+def test_autocorrect(row, col, edit):
+    assert autocorrect(row, col, AUTOCORRECT) == edit
+
+
+def test_autocorrect_off():
+    assert autocorrect("a--", 3, ["quotes"]) is None
+    assert autocorrect('"', 1, ["quotes"]) == (0, 1, "«")
