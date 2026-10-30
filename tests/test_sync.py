@@ -12,16 +12,18 @@ from fwriter.core.api.models import (
     RevisionInfo,
     SlimChapterInfo,
 )
+from fwriter.core.history import (
+    finish_merge,
+    load_merge,
+    postpone_merge,
+    restore_version,
+    start_merge,
+)
 from fwriter.core.merge import Hunk, Manual
 from fwriter.core.storage import ChapterMeta, ChapterStorage
 from fwriter.core.sync import (
     fetch_revisions,
-    finish_merge,
-    load_merge,
-    postpone_merge,
     publish_chapter,
-    restore_version,
-    start_merge,
     sync_chapter,
 )
 

@@ -17,19 +17,21 @@ from textual.widgets.text_area import Document
 from ..core.api.client import FicbookAPI
 from ..core.api.errors import FicbookAPIError, SiteRejectedError
 from ..core.api.models import RevisionInfo
+from ..core.history import (
+    Parts,
+    finish_merge,
+    load_merge,
+    postpone_merge,
+    restore_version,
+    start_merge,
+)
 from ..core.markup import Edit, Tweak, check, count, para_style, paras_touched, tweak
 from ..core.merge import Choice
 from ..core.storage import ChapterMeta, ChapterStorage, LastMerge, Version
 from ..core.sync import (
-    Parts,
     Synced,
     fetch_revisions,
-    finish_merge,
-    load_merge,
-    postpone_merge,
     publish_chapter,
-    restore_version,
-    start_merge,
     sync_chapter,
 )
 from .api_errors import report_api_error, report_disk_error
