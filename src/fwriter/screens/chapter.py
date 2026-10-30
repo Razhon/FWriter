@@ -62,7 +62,7 @@ STATUSES = {1: "черновик", 2: "опубликована", 3: "отлож
 class ChapterTab(TabPane):
     """Глава: текст, название по F2, дифф (F3), слияние (F4), отправка (F5), статус (F6).
 
-    draft.txt пишется через 2 с после ввода и при закрытии.
+    draft.txt пишется через 2 с после ввода, по Ctrl+S и при закрытии.
     """
 
     AUTOSAVE_DELAY = 2.0
@@ -77,6 +77,7 @@ class ChapterTab(TabPane):
         Binding("f7", "mode", "Режим"),
         Binding("f8", "help", "Справка"),
         Binding("f9", "tweaks", "Твики"),
+        Binding("ctrl+s", "save", show=False),
         Binding("escape", "hide_title", show=False),
     ]
     # param главы: действие сайта, пункт меню, текст ошибки
@@ -457,6 +458,11 @@ class ChapterTab(TabPane):
     @on(Input.Changed)
     def rename_tab(self, event: Input.Changed) -> None:
         self.query_ancestor(TabbedContent).get_tab(self).label = Content(event.value)
+
+    def action_save(self) -> None:
+        if self.save_timer:
+            self.save_timer.stop()
+        self.save()
 
     def save(self, notify: bool = True) -> bool:
         """False, если записать на диск не удалось; notify=False - без уведомления."""

@@ -612,6 +612,22 @@ def test_chapter_tab_saves_draft(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_ctrl_s_saves_draft_at_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(ChapterTab, "AUTOSAVE_DELAY", 60)
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft("00000000", "00000000", "Текст.")
+    main = MainScreen(api_without_fics(), storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await type_in_chapter(pilot, main)
+            assert storage.read_draft("00000000", "00000000") == "Текст."
+            await pilot.press("ctrl+s")
+            assert storage.read_draft("00000000", "00000000") == "Текст.!"
+
+    asyncio.run(run())
+
+
 def test_readonly_chapter_is_locked(tmp_path):
     storage = ChapterStorage(tmp_path)
     storage.write_draft("00000000", "00000000", "Текст.")
