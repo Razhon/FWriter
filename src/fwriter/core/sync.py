@@ -79,20 +79,23 @@ async def sync_chapter(
 
     FicbookAPIError - от сайта; OSError и ValueError - от диска.
     """
-    meta = storage.load_chapter(fic_id, chapter_id, title)
+    history_url = storage.load_chapter(fic_id, chapter_id, title).history_url
     status, site_title = None, title  # при readonly страницы главы нет (403)
     if not readonly:
         # каждый раз: статус и название меняют и на сайте
         chapter = await api.get_chapter(fic_id, chapter_id)
         status, site_title = chapter.status, chapter.title
-        if meta.history_url is None:
-            meta.history_url = chapter.history_url
-    elif meta.history_url is None:
-        meta.history_url = api.participated_history_url(fic_id, chapter_id)
+        history_url = history_url or chapter.history_url
+    else:
+        history_url = history_url or api.participated_history_url(fic_id, chapter_id)
+    revs = await api.get_chapter_revisions(history_url)
+    last = await api.get_revision(revs[0].url)
+
+    # после сети: между чтением и записью нет await, докачка не затрётся
+    meta = storage.load_chapter(fic_id, chapter_id, title)
+    meta.history_url = history_url
     meta.title, conflict = _merge_title(meta, site_title)
     meta.site_title = site_title
-    revs = await api.get_chapter_revisions(meta.history_url)
-    last = await api.get_revision(revs[0].url)
 
     known = next(
         (
@@ -505,7 +508,9 @@ async def _create_chapter(
     try:
         # base - отправленный текст, чтобы было с чем сливать, если история не прочитается;
         # до создания вкладка показала бы "как на сайте"
-        storage.write_chapter(fic_id, chapter_id, replace(meta, base=sent.file))
+        # перечитать: пока шёл create_chapter, chapter.json мог дописать другой
+        chapter = storage.read_chapter(fic_id, chapter_id)
+        storage.write_chapter(fic_id, chapter_id, replace(chapter, base=sent.file))
         storage.rename_chapter(fic_id, chapter_id, new_id, meta.title)
     except OSError, ValueError:
         log.warning(

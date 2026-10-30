@@ -128,6 +128,20 @@ def test_draft_equal_to_site_moves_base(tmp_path):
     assert storage.read_chapter(FIC, CH).base is not None
 
 
+def test_sync_keeps_version_written_during_request(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    sync(FakeAPI(rev("Старое.")), storage)
+
+    class FetchingAPI(FakeAPI):
+        async def get_revision(self, url: str) -> Revision:
+            # докачка успела записать правку, пока синхронизация ждала сайт
+            storage.add_version(FIC, CH, "Докачано.", "Глава", "site", site_rev="9001")
+            return await super().get_revision(url)
+
+    sync(FetchingAPI(rev("Старое.")), storage)
+    assert "9001" in [v.site_rev for v in storage.read_chapter(FIC, CH).versions]
+
+
 def test_readonly_uses_participated_history(tmp_path):
     storage = ChapterStorage(tmp_path)
     api = FakeAPI(rev("Текст."))
