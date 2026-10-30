@@ -80,7 +80,7 @@ def test_first_open_downloads_and_sets_base(tmp_path):
     assert meta.base == v.file
     assert (v.source, v.author, v.site_num, v.site_rev) == ("site", "3001", 1, None)
 
-    # второй раз: адрес истории с диска, новых версий нет, статус - снова с сайта
+    # второй раз: новых версий нет, статус и адрес истории - снова с сайта
     api.calls.clear()
     again = sync(api, storage)
     assert (again.kind, again.status) == ("same", 1)
@@ -152,6 +152,17 @@ def test_readonly_uses_participated_history(tmp_path):
     assert "chapter" not in api.calls
     assert api.calls[0] == FicbookAPI.participated_history_url(FIC, CH)
     assert storage.read_chapter(FIC, CH).title == "Из fic.json"
+
+
+def test_history_url_follows_chapter_page(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    sync(FakeAPI(rev("Текст.")), storage, readonly=True)
+    # роль сменилась: страница главы даёт mine вместо сохранённого participated
+    api = FakeAPI(rev("Текст."))
+    sync(api, storage)
+
+    assert api.calls[1] == MINE
+    assert storage.read_chapter(FIC, CH).history_url == MINE
 
 
 def test_initial_revision_matched_by_text(tmp_path):

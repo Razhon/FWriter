@@ -84,7 +84,8 @@ async def sync_chapter(
         # каждый раз: статус и название меняют и на сайте
         chapter = await api.get_chapter(fic_id, chapter_id)
         status, site_title = chapter.status, chapter.title
-        history_url = history_url or chapter.history_url
+        # со страницы каждый раз: с ролью меняется mine/participated
+        history_url = chapter.history_url
     else:
         history_url = history_url or api.participated_history_url(fic_id, chapter_id)
     revs = await api.get_chapter_revisions(history_url)
