@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import KW_ONLY, dataclass, replace
 from typing import Literal
 
 from .api.client import FicbookAPI
@@ -25,6 +25,7 @@ class Synced:
 
     kind: SyncKind
     text: str  # черновик после синхронизации
+    _: KW_ONLY
     site: Version | None = None  # новая ревизия сайта у ff и merge
     status: int | None = None  # param главы на сайте; None у readonly и не у автора
     title_conflict: str | None = None  # название на сайте, если поменяли оба
@@ -178,13 +179,28 @@ async def sync_chapter(
             for r in revs
             if base is None or base.site_num is None or r.num > base.site_num
         )
-        return Synced("merge", draft, site, status, conflict, newer, tuple(revs))
+        return Synced(
+            "merge",
+            draft,
+            site=site,
+            status=status,
+            title_conflict=conflict,
+            revs=newer,
+            history=tuple(revs),
+        )
     if kind != "same":
         storage.write_draft(fic_id, chapter_id, last.content)
     meta = storage.load_chapter(fic_id, chapter_id, title)
     storage.write_chapter(fic_id, chapter_id, replace(meta, base=site.file))
     ff = site if kind == "ff" else None
-    return Synced(kind, last.content, ff, status, conflict, history=tuple(revs))
+    return Synced(
+        kind,
+        last.content,
+        site=ff,
+        status=status,
+        title_conflict=conflict,
+        history=tuple(revs),
+    )
 
 
 FETCH_LIMIT = 30  # правок за одну синхронизацию: каждая - полный текст главы
@@ -274,6 +290,7 @@ class Published:
     """Отправка остановлена, если first.kind == "merge", есть error или unchanged."""
 
     first: Synced  # синхронизация перед отправкой
+    _: KW_ONLY
     error: MarkupError | None = None
     # синхронизация после отправки; None при отправке - история не перечиталась
     after: Synced | None = None
@@ -314,7 +331,7 @@ async def publish_chapter(
         return Published(first, unchanged=True)
     error = check(first.text)
     if error is not None:
-        return Published(first, error)
+        return Published(first, error=error)
     storage.add_version(fic_id, chapter_id, first.text, meta.title, "publish")
     reverted = await _revert(api, storage, fic_id, chapter_id, meta, first)
     if reverted is None:
@@ -332,7 +349,7 @@ async def publish_chapter(
     new = storage.read_chapter(fic_id, chapter_id)
     rev = next((v for v in new.versions if v.file == new.base), None)
     rev = None if new.base == meta.base else rev
-    return Published(first, None, after, rev, reverted=reverted)
+    return Published(first, after=after, rev=rev, reverted=reverted)
 
 
 async def _revert(
@@ -371,7 +388,7 @@ async def _create_chapter(
     first = Synced("same", text)
     error = check(text)
     if error is not None:
-        return Published(first, error)
+        return Published(first, error=error)
     title = storage.read_chapter(fic_id, chapter_id).title
     sent = storage.add_version(fic_id, chapter_id, text, title, "publish")
     # base и история - от удалённой главы
@@ -409,4 +426,4 @@ async def _create_chapter(
         return Published(first, created=new_id)
     new = storage.read_chapter(fic_id, new_id)
     rev = next((v for v in new.versions if v.file == new.base), None)
-    return Published(first, None, after, rev, created=new_id)
+    return Published(first, after=after, rev=rev, created=new_id)

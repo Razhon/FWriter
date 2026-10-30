@@ -685,7 +685,7 @@ def test_click_while_loading_sends_one_request(tmp_path):
             Synced(
                 "ff",
                 "Новое.",
-                Version(
+                site=Version(
                     "v.txt",
                     "Г",
                     "site",
@@ -1288,7 +1288,7 @@ def test_new_chapter_created_on_site(tmp_path, monkeypatch):
         sent.append((chapter_id, create))
         storage.rename_chapter(fic_id, chapter_id, "2002", title)
         first = Synced("same", "Текст.")
-        return Published(first, None, first, None, created="2002")
+        return Published(first, after=first, created="2002")
 
     monkeypatch.setattr("fwriter.screens.chapter.publish_chapter", published)
 
@@ -1656,9 +1656,9 @@ def test_f5_publishes_with_tab_locked(tmp_path, monkeypatch, error):
         seen.append((storage.read_draft(fic_id, chapter_id), tab.editor.read_only))
         first = Synced("same", "Текст.!")
         if error is not None:
-            return Published(first, error)
+            return Published(first, error=error)
         rev = Version("v.txt", "Глава", "site", "2026-10-28T12:00:00", site_num=3)
-        return Published(first, None, first, rev)
+        return Published(first, after=first, rev=rev)
 
     monkeypatch.setattr("fwriter.screens.chapter.publish_chapter", published)
 
@@ -1865,7 +1865,7 @@ def test_merge_screen_writes_result(tmp_path, monkeypatch):
     main = MainScreen(api_without_fics(), storage)
 
     async def synced(*args) -> Synced:
-        return Synced("merge", "Моё.\n\nОбщее.", site)
+        return Synced("merge", "Моё.\n\nОбщее.", site=site)
 
     monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
 
@@ -2195,7 +2195,7 @@ def test_f9_merges_site_first(tmp_path, monkeypatch):
     kinds: list[SyncKind] = ["same", "merge"]
 
     async def synced(*args) -> Synced:
-        return Synced(kinds.pop(0), "Моё.", site)
+        return Synced(kinds.pop(0), "Моё.", site=site)
 
     monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
 
