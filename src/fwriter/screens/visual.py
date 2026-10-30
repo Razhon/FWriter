@@ -65,6 +65,9 @@ class VisualEditor(ScrollView, can_focus=True):
         Binding("shift+pagedown", "paragraph(1, True)", show=False),
         Binding("backspace", "delete(False)", show=False),
         Binding("delete", "delete(True)", show=False),
+        # терминал шлёт alt+backspace как ctrl+w
+        Binding("ctrl+w", "delete_word", show=False),
+        Binding("alt+backspace", "delete_word", show=False),
         Binding("enter", "enter", show=False),
         Binding("tab", "tab", show=False),
         Binding("ctrl+b", "format('b')", show=False),
@@ -338,6 +341,17 @@ class VisualEditor(ScrollView, can_focus=True):
         # символ за краем строки читателя (за </center>) - другой абзац у читателя
         elif (c < size) if forward else (c > 0):
             self.replace("", (row, span[0]), (row, span[1]))
+
+    def action_delete_word(self) -> None:
+        if not self.fresh():
+            return
+        if self.editor.selection.is_empty:
+            # в начале строки читателя - как Backspace, он знает границу абзаца
+            if self.reader.locate(self.rows, *self.editor.selection.end)[1] == 0:
+                self.action_delete(False)
+                return
+            self.action_move("word_left", True)
+        self.replace_selection("")
 
     def action_undo(self) -> None:
         if self.editor.read_only:

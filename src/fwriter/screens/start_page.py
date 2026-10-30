@@ -215,7 +215,18 @@ class StartPageTab(TabPane):
         # строка, ждущая второго x, и её прежняя надпись
         self.armed: tuple[str, Content] | None = None
         self.disarm_timer: Timer | None = None
+        # куда вернуть фокус, когда на вкладку приходят снова; на запуске - AUTO_FOCUS
+        self.last_list: FicList | ChapterList | None = None
         super().__init__("Начало работы", id="start_page")
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        # только списки: при скрытии вкладки фокус уходит на соседнюю кнопку
+        if isinstance(event.widget, FicList | ChapterList):
+            self.last_list = event.widget
+
+    def focus_list(self) -> None:
+        # set_focus сразу, а не focus(): иначе Hide отдаёт фокус соседней кнопке
+        self.screen.set_focus(self.last_list or self.query_one(FicList))
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="start_head"):

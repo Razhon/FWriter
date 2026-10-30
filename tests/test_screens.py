@@ -1659,7 +1659,8 @@ def test_trash_local_chapters(tmp_path, monkeypatch):
             await pilot.pause()
             assert main.check_action("start_page", ())
             await pilot.press("f1")
-            assert main.focused is main.query_one(FicList)
+            # фокус вернулся в главы, откуда ушли
+            assert main.focused is chapters
             await press_twice(pilot, "2", "1")
             assert "закройте вкладку" in list(pilot.app._notifications)[-1].message
             assert storage.read_draft("2", "1") == "Раз."
@@ -2527,6 +2528,10 @@ def test_visual_editor(tmp_path):
             assert editor.text == "<b></b>— два!<uтри"
             await pilot.press("ctrl+z")
             assert editor.text == "<b>разx</b>  — два!<uтри"
+            # alt+backspace приходит как ctrl+w и стирает слово слева
+            await pilot.press("end", "ctrl+w")
+            assert editor.text == "<b>разx</b>  — два!<"
+            await pilot.press("ctrl+z")
             # клик - курсор в эту клетку, Shift+→ - выделение; рамка и отступ 1 + 2
             await pilot.click(VisualEditor, offset=(3 + 1, 2))
             assert editor.selection == Selection.cursor((0, 4))
@@ -2674,5 +2679,43 @@ def test_undo_off_while_read_only(tmp_path):
             editor.read_only = False
             await pilot.press("ctrl+z")
             assert editor.text == "раз"
+
+    asyncio.run(run())
+
+
+def test_visual_editor_delete_word(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "<center>раз</center>\nдва три")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            editor = main.query_one(ChapterTab).editor
+            await pilot.pause()
+            editor.selection = Selection.cursor((1, 7))
+            await pilot.press("ctrl+w")
+            assert editor.text == "<center>раз</center>\nдва "
+            await pilot.press("ctrl+z")
+            # выделение стирается целиком, а не словом
+            editor.selection = Selection((1, 1), (1, 6))
+            await pilot.press("ctrl+w")
+            assert editor.text == "<center>раз</center>\nди"
+            await pilot.press("ctrl+z")
+            # в начале строки Ctrl+W и Backspace делают одно и то же
+            editor.selection = Selection.cursor((1, 0))
+            await pilot.press("backspace")
+            by_backspace = editor.text
+            await pilot.press("ctrl+z")
+            editor.selection = Selection.cursor((1, 0))
+            await pilot.press("ctrl+w")
+            assert editor.text == by_backspace
+            await pilot.press("ctrl+z")
+            # только чтение: ничего не стирается
+            editor.read_only = True
+            editor.selection = Selection.cursor((1, 7))
+            await pilot.press("ctrl+w")
+            assert editor.text == "<center>раз</center>\nдва три"
 
     asyncio.run(run())

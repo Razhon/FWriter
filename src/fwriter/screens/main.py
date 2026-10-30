@@ -13,7 +13,7 @@ from ..core.api.models import Fic, Role, SlimChapterInfo, can_manage
 from ..core.storage import DATA_DIR, ChapterStorage
 from ..secrets import SecretStorage
 from .chapter import ChapterTab
-from .start_page import FicList, StartPageTab
+from .start_page import StartPageTab
 
 log = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ class MainScreen(Screen):
         self.show_info()
         # и после закрытия вкладки главы: иначе фокус на Tabs, мимо клавиш списка
         if self.query_one(TabbedContent).active == "start_page":
-            self.set_focus(self.query_one(FicList))
+            self.query_one(StartPageTab).focus_list()
 
     async def on_chapter_tab_title_saved(self, message: ChapterTab.TitleSaved) -> None:
         tab = message.tab
@@ -100,7 +100,7 @@ class MainScreen(Screen):
         tabbed.active = "start_page"
         # фокус из скрытой вкладки главы вернул бы её обратно; сразу, а не focus():
         # иначе Hide успевает отдать фокус соседу на скрытой вкладке
-        self.set_focus(tabbed.query_one(FicList))
+        self.query_one(StartPageTab).focus_list()
 
     def on_start_page_tab_open_chapter(self, message: StartPageTab.OpenChapter) -> None:
         self.open_chapter(message.fic, message.chapter, message.role, message.on_site)
