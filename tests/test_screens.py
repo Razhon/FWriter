@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 from rich.style import Style
+from textual import events
 from textual.app import App
 from textual.content import Content
 from textual.geometry import Offset
@@ -14,6 +15,7 @@ from textual.widgets.text_area import Selection
 from fwriter.core.api.client import FicbookAPI
 from fwriter.core.api.errors import (
     APIChangedError,
+    EditingDisabledError,
     FicbookAPIError,
     LoginFailedError,
     NetworkError,
@@ -1784,6 +1786,45 @@ def test_footer_order_in_chapter(tmp_path):
     asyncio.run(run())
 
 
+def test_chapter_page_403_makes_fic_readonly(tmp_path, monkeypatch):
+    """Права выключили после загрузки списка: глава открывается только для чтения."""
+    api = api_without_fics()
+    calls: list[bool] = []
+
+    async def fake_get_fics(role: str) -> list[Fic]:
+        return [FIC] if role == "coauthor" else []
+
+    async def synced(*args) -> Synced:
+        calls.append(args[-1])
+        if not args[-1]:
+            raise EditingDisabledError()
+        return Synced("same", "Текст.")
+
+    api.get_fics = fake_get_fics
+    monkeypatch.setattr("fwriter.screens.chapter.sync_chapter", synced)
+    storage = ChapterStorage(tmp_path)
+    main = MainScreen(api, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test() as pilot:
+            await pilot.app.workers.wait_for_complete()
+            main.open_chapter(FIC, FIC.chapters[0], "coauthor")
+            await pilot.app.workers.wait_for_complete()
+            await pilot.pause()
+            tab = main.query_one(ChapterTab)
+            assert calls == [False, True]
+            assert tab.editor.text == "Текст."
+            assert tab.editor.read_only and tab.title_input.disabled
+            assert not tab.check_action("publish", ())
+            assert storage.read_fic(FIC.id)[0].readonly
+            start = main.query_one(StartPageTab)
+            assert all(e.fic.readonly for e in start.entries)
+            messages = [n.message for n in pilot.app._notifications]
+            assert "Автор выключил вам редактирование работы" in messages
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("before", "action", "presses"), [(1, "show_part", 2), (2, "hide_part", 1)]
 )
@@ -2746,6 +2787,34 @@ def test_visual_editor_delete_word(tmp_path):
             editor.selection = Selection.cursor((1, 7))
             await pilot.press("ctrl+w")
             assert editor.text == "<center>раз</center>\nдва три"
+
+    asyncio.run(run())
+
+
+def test_ctrl_backspace_deletes_word(tmp_path):
+    storage = ChapterStorage(tmp_path)
+    storage.write_draft(FIC.id, "00000000", "раз два")
+    main = MainScreen(None, storage)
+
+    async def run():
+        async with MainScreenApp(main).run_test(size=(120, 30)) as pilot:
+            await pilot.app.workers.wait_for_complete()
+            await open_chapter(pilot, main)
+            editor = main.query_one(ChapterTab).editor
+            await pilot.pause()
+            # ctrl+backspace доходит как backspace с символом ^H
+            for _ in range(2):
+                assert main.focused is not None
+                editor.selection = Selection.cursor((0, 7))
+                main.focused.post_message(events.Key("backspace", "\x08"))
+                await pilot.pause()
+                assert editor.text == "раз "
+                await pilot.press("ctrl+z")
+                # обычный backspace по-прежнему стирает символ
+                editor.selection = Selection.cursor((0, 7))
+                await pilot.press("backspace")
+                assert editor.text == "раз дв"
+                await pilot.press("ctrl+z", "f7")
 
     asyncio.run(run())
 

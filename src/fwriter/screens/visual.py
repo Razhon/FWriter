@@ -466,7 +466,12 @@ class VisualEditor(ScrollView, can_focus=True):
         self.replace_selection(event.text)
 
     def on_key(self, event: events.Key) -> None:
-        if event.is_printable and event.character:
+        # ctrl+backspace терминал шлёт как ^H, а Textual называет его просто backspace
+        if event.key == "backspace" and event.character == "\x08":
+            event.stop()
+            event.prevent_default()
+            self.action_delete_word()
+        elif event.is_printable and event.character:
             event.stop()
             event.prevent_default()
             if self.replace_selection(event.character):

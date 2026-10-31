@@ -94,6 +94,9 @@ class MainScreen(Screen):
         # new-N в "Продолжить" больше не найдётся
         await start.remember(tab.fic_id, tab.chapter_id)
 
+    def on_chapter_tab_readonly_now(self, message: ChapterTab.ReadonlyNow) -> None:
+        self.query_one(StartPageTab).refresh_fic(message.tab.fic_id, readonly=True)
+
     async def on_chapter_tab_dropped(self, message: ChapterTab.Dropped) -> None:
         await self.query_one(TabbedContent).remove_pane(message.tab.id or "")
 

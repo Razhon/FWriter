@@ -13,6 +13,7 @@ from fwriter.core.api.client import FicbookAPI
 from fwriter.core.api.errors import (
     APIChangedError,
     ChapterChangedError,
+    EditingDisabledError,
     LoginFailedError,
     NetworkError,
     SiteError,
@@ -233,6 +234,13 @@ def test_http_errors_become_api_errors(handler, text: str):
     with pytest.raises((NetworkError, SiteError)) as e:
         asyncio.run(mock_api(handler)._get("/"))
     assert str(e.value) == text
+
+
+def test_chapter_page_403_is_editing_disabled():
+    api = mock_api(lambda _: httpx.Response(403))
+    with pytest.raises(EditingDisabledError) as e:
+        asyncio.run(api.get_chapter("1", "2"))
+    assert str(e.value) == "Автор выключил вам редактирование работы"
 
 
 def get_chapter(html: str) -> Chapter:

@@ -285,7 +285,13 @@ class FicbookAPI:
         self, fic_id: str, chapter_id: str
     ) -> tuple[BeautifulSoup, Tag, str]:
         """Страница главы, форма с неё и текст главы на сайте."""
-        response = await self._get(f"/home/myfics/{fic_id}/parts/{chapter_id}")
+        try:
+            response = await self._get(f"/home/myfics/{fic_id}/parts/{chapter_id}")
+        except SiteError as e:
+            # 403 у страницы главы бывает, только если права выключил автор
+            if e.status == 403:
+                raise EditingDisabledError() from e
+            raise
         soup = BeautifulSoup(response.text, "html.parser")
         form = req(soup.find("form", id="savePartForm"), "форма главы (savePartForm)")
         editor = req(form.find("fanfic-editor"), "редактор главы (fanfic-editor)")

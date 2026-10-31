@@ -16,7 +16,7 @@ from textual.widgets import Input, Static, TabbedContent, TabPane, TextArea
 from textual.widgets.text_area import Document
 
 from ..core.api.client import FicbookAPI
-from ..core.api.errors import FicbookAPIError, SiteRejectedError
+from ..core.api.errors import EditingDisabledError, FicbookAPIError, SiteRejectedError
 from ..core.api.models import RevisionInfo
 from ..core.history import (
     Parts,
@@ -111,6 +111,13 @@ class ChapterTab(TabPane):
 
     class Created(Message):
         """F5 создал главу на сайте, chapter_id уже новый: список работы перестраивает MainScreen."""
+
+        def __init__(self, tab: ChapterTab) -> None:
+            self.tab = tab
+            super().__init__()
+
+    class ReadonlyNow(Message):
+        """Страница главы ответила 403: работа стала только для чтения."""
 
         def __init__(self, tab: ChapterTab) -> None:
             self.tab = tab
@@ -528,14 +535,21 @@ class ChapterTab(TabPane):
         status, synced = self.site_status, None
         self.stop_fetch()
         try:
-            synced = await sync_chapter(
-                self.api,
-                self.storage,
-                self.fic_id,
-                self.chapter_id,
-                self.title_input.value,
-                self.readonly,
-            )
+            try:
+                synced = await self.sync_once()
+            except EditingDisabledError:
+                log.warning(
+                    "глава %s: редактирование выключено", self.where, exc_info=True
+                )
+                self.notify(
+                    "Автор выключил вам редактирование работы", severity="warning"
+                )
+                self.readonly = True
+                self.title_editable = self.publishable = False
+                self.post_message(self.ReadonlyNow(self))
+                self.storage.set_readonly(self.fic_id)
+                # не повтор POST: синхронизация только читает, теперь через participated
+                synced = await self.sync_once()
         except FicbookAPIError as e:
             report_api_error(self, e, action)
         except (OSError, ValueError) as e:
@@ -550,6 +564,17 @@ class ChapterTab(TabPane):
         if synced is not None:
             self.history = synced.history
         return synced
+
+    async def sync_once(self) -> Synced:
+        assert self.api is not None
+        return await sync_chapter(
+            self.api,
+            self.storage,
+            self.fic_id,
+            self.chapter_id,
+            self.title_input.value,
+            self.readonly,
+        )
 
     def stop_fetch(self) -> None:
         # sync_chapter читает chapter.json до сети и пишет после: докачка затёрлась бы

@@ -234,6 +234,11 @@ class ChapterStorage:
     def read_fic(self, fic_id: str) -> tuple[Fic, Role]:
         return self._read_fic(self._fic(fic_id) / "fic.json")
 
+    def set_readonly(self, fic_id: str) -> None:
+        """Права выключили после загрузки списка: список глав прежний."""
+        fic, role = self.read_fic(fic_id)
+        self.write_fic(replace(fic, readonly=True), role)
+
     def read_fics(
         self, skip: Container[str] = ()
     ) -> tuple[list[tuple[Fic, Role]], list[str]]:

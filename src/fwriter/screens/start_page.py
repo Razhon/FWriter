@@ -554,12 +554,20 @@ class StartPageTab(TabPane):
         chapter = SlimChapterInfo(chapter_id, title)
         self.post_message(StartPageTab.OpenChapter(fic, chapter, role, on_site=False))
 
-    def refresh_fic(self, fic_id: str, added: SlimChapterInfo | None = None) -> None:
-        """Список глав работы заново; added - глава, только что созданная на сайте."""
+    def refresh_fic(
+        self,
+        fic_id: str,
+        added: SlimChapterInfo | None = None,
+        readonly: bool = False,
+    ) -> None:
+        """Список глав работы заново.
+
+        added - глава, только что созданная на сайте; readonly - права выключили сейчас.
+        """
         for i, old in enumerate(self.entries):
             if old.fic.id != fic_id or old.gone_fic:
                 continue
-            fic = old.fic
+            fic = replace(old.fic, readonly=True) if readonly else old.fic
             if added is not None and all(ch.id != added.id for ch in fic.chapters):
                 fic = replace(fic, chapters=[*fic.chapters, added])
             self.entries[i] = self.entry(fic, old.role, find_gone=not fic.readonly)

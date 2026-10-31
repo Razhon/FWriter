@@ -2,6 +2,7 @@ from typing import ClassVar
 
 from rich.style import Style
 from rich.text import Text
+from textual import events
 from textual.actions import SkipAction
 from textual.binding import Binding, BindingType
 from textual.geometry import Region, Size
@@ -39,6 +40,13 @@ class ChapterEditor(TextArea):
         Binding("shift+pageup", "paragraph(-1, True)", show=False),
         Binding("shift+pagedown", "paragraph(1, True)", show=False),
     ]
+
+    def on_key(self, event: events.Key) -> None:
+        # ctrl+backspace терминал шлёт как ^H, а Textual называет его просто backspace
+        if event.key == "backspace" and event.character == "\x08":
+            event.stop()
+            event.prevent_default()
+            self.action_delete_word_left()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         # только для чтения tab уходит к экрану и переводит фокус

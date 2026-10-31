@@ -47,6 +47,18 @@ class SiteError(FicbookAPIError):
         return self.status == 429 or self.status >= 500
 
 
+class EditingDisabledError(SiteError):
+    """Страница главы ответила 403: автор выключил помощнику редактирование."""
+
+    TEXTS: ClassVar[dict[int, str]] = {
+        **SiteError.TEXTS,
+        403: "Автор выключил вам редактирование работы",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(403)
+
+
 class SiteRejectedError(FicbookAPIError):
     """Сайт ответил на POST отказом: текст из error или капча."""
 
